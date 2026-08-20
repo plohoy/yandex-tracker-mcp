@@ -161,6 +161,17 @@ def _cap_rows_for_budget(
                 hi = mid - 1
         response[key] = rows[:lo]
         coverage[f"rows_returned_{key}"] = lo
+    if len(list_keys) == 1 and coverage.get("total_rows"):
+        # Size-capped page: expose the EFFECTIVE page size and the real page
+        # count so callers can continue with page=2..pages_total using the
+        # returned per_page — otherwise the remainder is unreachable
+        # (e.g. per_page=200 gets capped to 31 rows yet pages_total says 1).
+        returned = len(response.get(list_keys[0]) or [])
+        if returned:
+            coverage["per_page"] = returned
+            coverage["pages_total"] = max(
+                1, (coverage["total_rows"] + returned - 1) // returned
+            )
     return response
 
 

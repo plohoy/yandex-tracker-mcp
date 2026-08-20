@@ -343,3 +343,44 @@ class TestToolResponsesFitBudget:
         assert page1["total_comments"] == 300
         assert page1["coverage"]["pages_total"] == 3
         assert page1["coverage"].get("rows_capped") is None  # page fits, no cap
+
+    async def test_capped_page_exposes_effective_per_page(
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_users_protocol: AsyncMock,
+    ) -> None:
+        from mcp_tracker.tracker.proto.types.users import User
+
+        # 45 issues requested with per_page=200: one "page", but the size cap
+        # trims it -> coverage must expose the effective page size so the
+        # remainder stays reachable via page=2.
+        issues = [_issue(f"TEST-{i}", summary="Тест " * 60) for i in range(1, 46)]
+        mock_users_protocol.users_list = AsyncMock(
+            return_value=[User.model_construct(login="tester", display="Tester")]
+        )
+        mock_issues_protocol.issues_find_filter = AsyncMock(return_value=issues)
+
+        page1 = get_tool_result_content(
+            await client_session.call_tool(
+                "issues_assigned_open",
+                {"assignee": "tester", "page": 1, "per_page": 200},
+            )
+        )
+        effective = page1["coverage"]["per_page"]
+        assert page1["coverage"]["rows_capped"] is True
+        assert effective < 45  # capped below the requested 200
+        assert page1["coverage"]["pages_total"] == max(
+            1, -(-45 // effective)
+        )  # remainder reachable
+        assert page1["coverage"]["total_rows"] == 45
+
+        mock_issues_protocol.issues_find_filter = AsyncMock(return_value=issues)
+        page2 = get_tool_result_content(
+            await client_session.call_tool(
+                "issues_assigned_open",
+                {"assignee": "tester", "page": 2, "per_page": effective},
+            )
+        )
+        keys = {m["key"] for m in page1["matches"] + page2["matches"]}
+        assert len(keys) == 45  # complete, no overlap, no loss
