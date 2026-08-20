@@ -14,6 +14,29 @@ A comprehensive Model Context Protocol (MCP) server that enables AI assistants t
 
 Documentation in Russian is available [here](README_ru.md) / Документация на русском языке доступна [здесь](README_ru.md).
 
+## Fork notes (plohoy)
+
+Maintained fork of [aikts/yandex-tracker-mcp](https://github.com/aikts/yandex-tracker-mcp)
+based on **v0.7.1** with local fixes not (yet) upstream. Upstream `main` has
+moved to 0.8.0 (entities API; `issues_summarize_effort` removed) — this fork
+intentionally stays on 0.7.1 because the runtime integration depends on
+`issues_summarize_effort`. Upstream sync stays possible via the `upstream` remote.
+
+Local delta vs v0.7.1:
+
+- `issues_count_release_status_returns` — compact mode:
+  `include_evidence=false` drops per-issue transition proof lists,
+  `returned_only=true` keeps only rows with `return_count > 0`; counters and
+  coverage stay complete. ~80% smaller responses for counting queries.
+- Deterministic assignee resolution cascade (`resolve_assignee_core` in
+  `mcp/tools/user.py`): exact login → email → unique last/first name → full
+  name → fuzzy; ambiguous matches are reported as candidates, never guessed.
+- Tracker client: `fields` selector support, `boards_get_all`,
+  `board_get_sprints`, `issues_find_filter`, `issue_get_status_changelog`
+  (cached) plus matching protocol stubs.
+- Pagination guidance rewritten: prefer aggregate tools over manual page
+  loops and free-form YQL.
+
 ## Features
 
 - **Complete Queue Management**: List and access all available Yandex Tracker queues with pagination support, tag retrieval, and detailed metadata

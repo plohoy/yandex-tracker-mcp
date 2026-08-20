@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.1.post1] - 2026-08-20
+
+Fork (plohoy) — local fixes on top of v0.7.1:
+
+- `issues_count_release_status_returns`: compact mode via
+  `include_evidence=false` and `returned_only=true` (full counters/coverage
+  preserved; ~80% smaller responses for counting queries).
+- Deterministic assignee resolution (exact → unique → fuzzy; ambiguous
+  matches reported as candidates).
+- Tracker client additions: `fields` selector, boards/sprints,
+  `issues_find_filter`, `issue_get_status_changelog` (cached) and protocol
+  stubs.
+- Pagination guidance: prefer aggregate tools over manual page loops.
+
 ## [0.7.1] - 2026-05-23
 
 ### Features

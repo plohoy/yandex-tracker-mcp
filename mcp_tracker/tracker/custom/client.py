@@ -546,14 +546,17 @@ class TrackerClient(QueuesProtocol, IssueProtocol, GlobalDataProtocol, UsersProt
         self,
         query: str,
         *,
+        fields: list[str] | None = None,
         per_page: int = 15,
         page: int = 1,
         auth: YandexAuth | None = None,
     ) -> list[Issue]:
-        params = {
+        params: dict[str, Any] = {
             "perPage": per_page,
             "page": page,
         }
+        if fields:
+            params["fields"] = ",".join(fields)
 
         body: dict[str, Any] = {
             "query": query,
@@ -567,6 +570,80 @@ class TrackerClient(QueuesProtocol, IssueProtocol, GlobalDataProtocol, UsersProt
         ) as response:
             response.raise_for_status()
             return IssueList.model_validate_json(await response.read()).root
+
+    async def boards_get_all(
+        self, *, auth: YandexAuth | None = None
+    ) -> list[dict[str, object]]:
+        """Return Tracker boards for server-side board resolution."""
+        async with self._session.get(
+            "v3/boards", headers=await self._build_headers(auth)
+        ) as response:
+            response.raise_for_status()
+            payload = await response.json()
+            if not isinstance(payload, list):
+                raise ValueError("Tracker boards response is not a list")
+            return payload
+
+    async def board_get_sprints(
+        self, board_id: int, *, auth: YandexAuth | None = None
+    ) -> list[dict[str, object]]:
+        """Return all sprints configured on a Tracker board."""
+        async with self._session.get(
+            f"v3/boards/{board_id}/sprints", headers=await self._build_headers(auth)
+        ) as response:
+            response.raise_for_status()
+            payload = await response.json()
+            if not isinstance(payload, list):
+                raise ValueError("Tracker board sprints response is not a list")
+            return payload
+
+    async def issues_find_filter(
+        self,
+        filters: dict[str, object],
+        *,
+        fields: list[str] | None = None,
+        per_page: int = 100,
+        page: int = 1,
+        auth: YandexAuth | None = None,
+    ) -> list[Issue]:
+        """Search with Tracker's structured filter body instead of model-written YQL."""
+        params: dict[str, object] = {"perPage": per_page, "page": page}
+        if fields:
+            params["fields"] = ",".join(fields)
+        async with self._session.post(
+            "v3/issues/_search",
+            headers=await self._build_headers(auth),
+            json={"filter": filters},
+            params=params,
+        ) as response:
+            response.raise_for_status()
+            return IssueList.model_validate_json(await response.read()).root
+
+    async def issue_get_status_changelog(
+        self,
+        issue_id: str,
+        *,
+        auth: YandexAuth | None = None,
+    ) -> list[dict[str, object]]:
+        """Return every status change, following Tracker's relative pagination."""
+        url: str | Any = f"v3/issues/{issue_id}/changelog"
+        params: dict[str, object] | None = {"field": "status", "perPage": 100}
+        result: list[dict[str, object]] = []
+        while url:
+            async with self._session.get(
+                url,
+                headers=await self._build_headers(auth),
+                params=params,
+            ) as response:
+                response.raise_for_status()
+                page = await response.json()
+                if not isinstance(page, list):
+                    raise ValueError("Tracker changelog response is not a list")
+                result.extend(page)
+                next_link = response.links.get("next")
+                url = next_link["url"] if next_link else ""
+                params = None
+        return result
 
     async def issue_get_worklogs(
         self, issue_id: str, *, auth: YandexAuth | None = None

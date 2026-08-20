@@ -81,10 +81,32 @@ class IssueProtocol(Protocol):
         self,
         query: str,
         *,
+        fields: list[str] | None = None,
         per_page: int = 15,
         page: int = 1,
         auth: YandexAuth | None = None,
     ) -> list[Issue]: ...
+    async def boards_get_all(
+        self, *, auth: YandexAuth | None = None
+    ) -> list[dict[str, object]]: ...
+    async def board_get_sprints(
+        self, board_id: int, *, auth: YandexAuth | None = None
+    ) -> list[dict[str, object]]: ...
+    async def issues_find_filter(
+        self,
+        filters: dict[str, object],
+        *,
+        fields: list[str] | None = None,
+        per_page: int = 100,
+        page: int = 1,
+        auth: YandexAuth | None = None,
+    ) -> list[Issue]: ...
+    async def issue_get_status_changelog(
+        self,
+        issue_id: str,
+        *,
+        auth: YandexAuth | None = None,
+    ) -> list[dict[str, object]]: ...
     async def issue_get_worklogs(
         self, issue_id: str, *, auth: YandexAuth | None = None
     ) -> list[Worklog]: ...

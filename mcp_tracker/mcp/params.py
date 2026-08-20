@@ -102,5 +102,5 @@ In russian Yandex Tracker is called "Яндекс Трекер", "Трекер".
 Queues may be called "Очереди".
 Tasks may be called "Задачи", "Issues", "Таски", "ишью".
 
-When using tools that accept `page` and/or `per_page` parameters and when the task is to find something in the result set (or to receive all available data) - always call the tool as many times as needed increasing the `page` parameter until ther result set is exhausted. If you stumble with the context size limit — try to change the `per_page` parameter to a lower value and restart the search from the `page=1`.
+For ordinary overview requests, fetch only page 1 with at most 20 items and summarize it. For requests asking for all results, statistics, counts, frequency tables, or top-N values from issue descriptions, use issues_analyze_description_field with its structured queue/date_from/date_to parameters; do not write free-form YQL for that tool, manually paginate issues_find, or infer a total from one page. Never repeat an identical page request after it succeeds.
 """

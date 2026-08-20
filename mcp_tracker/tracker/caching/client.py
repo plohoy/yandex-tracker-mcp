@@ -214,15 +214,58 @@ def make_cached_protocols(
             self,
             query: str,
             *,
+            fields: list[str] | None = None,
             per_page: int = 15,
             page: int = 1,
             auth: YandexAuth | None = None,
         ) -> list[Issue]:
             return await self._original.issues_find(
                 query=query,
+                fields=fields,
                 per_page=per_page,
                 page=page,
                 auth=auth,
+            )
+
+        @cached(**cache_config)
+        async def boards_get_all(
+            self, *, auth: YandexAuth | None = None
+        ) -> list[dict[str, object]]:
+            return await self._original.boards_get_all(auth=auth)
+
+        @cached(**cache_config)
+        async def board_get_sprints(
+            self, board_id: int, *, auth: YandexAuth | None = None
+        ) -> list[dict[str, object]]:
+            return await self._original.board_get_sprints(board_id, auth=auth)
+
+        @cached(**cache_config)
+        async def issues_find_filter(
+            self,
+            filters: dict[str, object],
+            *,
+            fields: list[str] | None = None,
+            per_page: int = 100,
+            page: int = 1,
+            auth: YandexAuth | None = None,
+        ) -> list[Issue]:
+            return await self._original.issues_find_filter(
+                filters=filters,
+                fields=fields,
+                per_page=per_page,
+                page=page,
+                auth=auth,
+            )
+
+        @cached(**cache_config)
+        async def issue_get_status_changelog(
+            self,
+            issue_id: str,
+            *,
+            auth: YandexAuth | None = None,
+        ) -> list[dict[str, object]]:
+            return await self._original.issue_get_status_changelog(
+                issue_id, auth=auth
             )
 
         @cached(**cache_config)
