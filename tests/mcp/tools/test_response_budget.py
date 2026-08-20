@@ -324,18 +324,17 @@ class TestToolResponsesFitBudget:
 
         page1 = get_tool_result_content(
             await client_session.call_tool(
-                "issue_get_comments",
-                {"issue_id": "TEST-123", "page": 1, "per_page": 150},
+                "issue_get_comments", {"issue_id": "TEST-123", "page": 1, "per_page": 100}
             )
         )
-        page2 = get_tool_result_content(
+        page3 = get_tool_result_content(
             await client_session.call_tool(
-                "issue_get_comments",
-                {"issue_id": "TEST-123", "page": 2, "per_page": 150},
+                "issue_get_comments", {"issue_id": "TEST-123", "page": 3, "per_page": 100}
             )
         )
 
-        assert len(page1["comments"]) == 150
-        assert len(page2["comments"]) == 150
+        assert len(page1["comments"]) == 100
+        assert len(page3["comments"]) == 100  # 300 = 3 pages of 100
         assert page1["total_comments"] == 300
-        assert page1["coverage"]["pages_total"] == 2
+        assert page1["coverage"]["pages_total"] == 3
+        assert page1["coverage"].get("rows_capped") is None  # page fits, no cap
