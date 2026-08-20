@@ -1,6 +1,7 @@
 """Issue read-only MCP tools."""
 
 import hashlib
+import json
 import logging
 import re
 import sys
@@ -29,13 +30,11 @@ from mcp_tracker.tracker.proto.types.issues import (
     ChecklistItem,
     Issue,
     IssueAttachment,
-    IssueComment,
     IssueFieldsEnum,
     IssueLink,
     IssueTransition,
     Worklog,
 )
-
 
 _LEADING_LIST_MARKER = re.compile(r"^\s*(?:[-*•]\s*)?(?:\d+\s*[.)]?\s*)?")
 _EMPTY_DESCRIPTION_VALUES = {
@@ -100,6 +99,84 @@ def _duration_hours(value: object) -> float:
         + parts["minutes"] / 60
         + parts["seconds"] / 3600
     )
+
+
+# In-session tool results are truncated by Hermes above a context-scaled
+# budget (39,321 chars on a 64K-token model: window*4*0.15); the sandbox
+# persistence path is unavailable here, so oversized results become a broken
+# 1.5K preview. Every list-returning tool must keep its serialized response
+# under this budget — rows are pre-sorted by relevance and tail-trimmed, with
+# the cap reported in coverage so callers never mistake a partial table for a
+# complete one.
+_RESPONSE_BUDGET_CHARS: int = 35_000
+
+
+def _model_dump_jsonable(value: Any) -> Any:
+    """Convert pydantic models (IssueComment, Worklog, ...) to plain dicts for
+    the serialized-size estimate; the MCP layer serializes them the same way."""
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return dump(mode="json")
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _response_size(obj: Any) -> int:
+    """Length of the response as it will be serialized into the conversation."""
+    return len(json.dumps(obj, ensure_ascii=False, default=_model_dump_jsonable))
+
+
+def _cap_rows_for_budget(
+    response: dict[str, Any],
+    *list_keys: str,
+    budget: int = _RESPONSE_BUDGET_CHARS,
+) -> dict[str, Any]:
+    """Trim trailing rows of each ``list_keys`` field until the serialized
+    response fits ``budget``. Counters stay complete; coverage gains
+    rows_capped / rows_total_<key> / rows_returned_<key>."""
+    if not list_keys:
+        return response
+    if _response_size(response) <= budget:
+        return response
+    coverage = response.setdefault("coverage", {})
+    originally = {key: len(response.get(key) or []) for key in list_keys}
+    coverage["rows_capped"] = True
+    for key in list_keys:
+        coverage[f"rows_total_{key}"] = originally[key]
+        rows = response.get(key) or []
+        if not rows:
+            coverage[f"rows_returned_{key}"] = 0
+            continue
+        lo, hi = 0, len(rows)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            response[key] = rows[:mid]
+            coverage[f"rows_returned_{key}"] = mid
+            if _response_size(response) <= budget:
+                lo = mid
+            else:
+                hi = mid - 1
+        response[key] = rows[:lo]
+        coverage[f"rows_returned_{key}"] = lo
+    return response
+
+
+def _cap_worklogs_for_budget(
+    result: dict[str, list],
+    budget: int = _RESPONSE_BUDGET_CHARS,
+) -> tuple[dict[str, list], dict[str, int]]:
+    """Trim trailing worklog entries (longest list first) until the dict fits
+    ``budget``. Returns (result, {issue_key: original_total}) for the trimmed
+    keys so partial data is never presented as complete."""
+    if _response_size(result) <= budget:
+        return result, {}
+    truncated: dict[str, int] = {}
+    while _response_size(result) > budget:
+        key = max(result, key=lambda k: len(result[k]))
+        if not result[key]:
+            break
+        truncated.setdefault(key, len(result[key]))
+        result[key] = result[key][:-1]
+    return result, truncated
 
 
 def _normalize_description_label(value: str) -> str:
@@ -408,7 +485,11 @@ async def issues_search_text_core(
             None,
             error="queue must be a canonical queue key such as SOMEPROJECT",
         )
-    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= _SEARCH_LIMIT_MAX:
+    if (
+        not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not 1 <= limit <= _SEARCH_LIMIT_MAX
+    ):
         return envelope(
             "invalid_request",
             [],
@@ -643,7 +724,7 @@ async def _open_issues_by_person_core(
             result["error"] = error
         if candidates is not None:
             result["candidates"] = candidates
-        return result
+        return _cap_rows_for_budget(result, "matches")
 
     login: str
     resolved_by: str | None
@@ -678,7 +759,10 @@ async def _open_issues_by_person_core(
                 return envelope(
                     "upstream_error",
                     [],
-                    {"complete": False, "reason": f"upstream error: {type(exc).__name__}"},
+                    {
+                        "complete": False,
+                        "reason": f"upstream error: {type(exc).__name__}",
+                    },
                     error=type(exc).__name__,
                     resolved_login=raw_person,
                 )
@@ -697,7 +781,10 @@ async def _open_issues_by_person_core(
                 return envelope(
                     ambiguous_status,
                     [],
-                    {"complete": False, "reason": f"{person_noun} matches several users"},
+                    {
+                        "complete": False,
+                        "reason": f"{person_noun} matches several users",
+                    },
                     error=f"{raw_person!r} matches several users; call again with the exact login",
                     resolved_login=raw_person,
                     candidates=options,
@@ -706,7 +793,10 @@ async def _open_issues_by_person_core(
                 return envelope(
                     "user_not_found",
                     [],
-                    {"complete": False, "reason": f"{person_noun} could not be resolved"},
+                    {
+                        "complete": False,
+                        "reason": f"{person_noun} could not be resolved",
+                    },
                     error=f"no Tracker user matches {raw_person!r}",
                     resolved_login=raw_person,
                 )
@@ -715,7 +805,8 @@ async def _open_issues_by_person_core(
                     "invalid_request",
                     [],
                     {"complete": False, "reason": "invalid request"},
-                    error=resolution.get("reason") or f"{query_field} query is too short",
+                    error=resolution.get("reason")
+                    or f"{query_field} query is too short",
                     resolved_login=raw_person,
                 )
     else:
@@ -729,7 +820,10 @@ async def _open_issues_by_person_core(
                 return envelope(
                     "upstream_error",
                     [],
-                    {"complete": False, "reason": f"upstream error: {type(exc).__name__}"},
+                    {
+                        "complete": False,
+                        "reason": f"upstream error: {type(exc).__name__}",
+                    },
                     error=type(exc).__name__,
                 )
     if not login or not re.fullmatch(r"[A-Za-z0-9_.-]{2,}", login):
@@ -742,8 +836,16 @@ async def _open_issues_by_person_core(
             resolved_by=resolved_by,
         )
 
-    fields = ["key", "summary", "status", "statusType", "queue", "updatedAt",
-              "assignee", "priority"]
+    fields = [
+        "key",
+        "summary",
+        "status",
+        "statusType",
+        "queue",
+        "updatedAt",
+        "assignee",
+        "priority",
+    ]
     issues_by_key: dict[str, Issue] = {}
     complete = True
     try:
@@ -923,13 +1025,21 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     async def issue_get_comments(
         ctx: Context[Any, AppContext],
         issue_id: IssueID,
-    ) -> list[IssueComment]:
+    ) -> dict[str, Any]:
         check_issue_access(settings, issue_id)
 
-        return await ctx.request_context.lifespan_context.issues.issue_get_comments(
+        comments = await ctx.request_context.lifespan_context.issues.issue_get_comments(
             issue_id,
             auth=get_yandex_auth(ctx),
         )
+        response = {
+            "status": "complete",
+            "issue_id": issue_id,
+            "total_comments": len(comments),
+            "comments": comments or [],
+            "coverage": {"complete": True},
+        }
+        return _cap_rows_for_budget(response, "comments")
 
     @mcp.tool(
         title="Get Issue Links",
@@ -1016,7 +1126,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ctx: Context[Any, AppContext],
         text: Annotated[
             str,
-            Field(min_length=2, description="Words from the issue title or description"),
+            Field(
+                min_length=2, description="Words from the issue title or description"
+            ),
         ],
         queue: Annotated[
             str | None,
@@ -1140,7 +1252,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     async def issues_count_queue_status(
         ctx: Context[Any, AppContext],
         queue: Annotated[str, Field(min_length=1, description="Queue key")],
-        status: Annotated[str, Field(min_length=1, description="Exact displayed status name")],
+        status: Annotated[
+            str, Field(min_length=1, description="Exact displayed status name")
+        ],
         max_issues: Annotated[int, Field(ge=1, le=10_000)] = 2_000,
     ) -> dict[str, Any]:
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
@@ -1148,12 +1262,17 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         issues_api = ctx.request_context.lifespan_context.issues
         auth = get_yandex_auth(ctx)
         wanted = " ".join(status.casefold().split())
-        global_statuses = await ctx.request_context.lifespan_context.fields.get_statuses(auth=auth)
-        status_keys = sorted({
-            item.key
-            for item in global_statuses
-            if " ".join(item.name.casefold().split()) == wanted or item.key.casefold() == wanted
-        })
+        global_statuses = (
+            await ctx.request_context.lifespan_context.fields.get_statuses(auth=auth)
+        )
+        status_keys = sorted(
+            {
+                item.key
+                for item in global_statuses
+                if " ".join(item.name.casefold().split()) == wanted
+                or item.key.casefold() == wanted
+            }
+        )
         alias_key = _STATUS_ALIASES.get(wanted)
         if alias_key:
             status_keys = sorted(set(status_keys) | {alias_key})
@@ -1186,8 +1305,10 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                     break
                 page += 1
         matched = [
-            issue for issue in issues
-            if issue.status and (
+            issue
+            for issue in issues
+            if issue.status
+            and (
                 issue.status.key in status_keys
                 or " ".join((issue.status.display or "").casefold().split()) == wanted
             )
@@ -1202,24 +1323,27 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             }
             for issue in matched
         ]
-        return {
-            "status": "complete",
-            "complete": True,
-            "scope": "entire_queue",
-            "queue": queue,
-            "issue_status": status,
-            "status_keys": status_keys,
-            "count": len(rows),
-            "table": rows,
-            "issues_scanned": len(issues),
-            "pages_fetched": pages,
-            "reporting_contract": {
-                "do_not_claim_current_sprint": True,
-                "do_not_add_unrequested_scope": True,
-                "zero_is_valid": True,
-                "status_resolved_from_catalogue": True,
+        return _cap_rows_for_budget(
+            {
+                "status": "complete",
+                "complete": True,
+                "scope": "entire_queue",
+                "queue": queue,
+                "issue_status": status,
+                "status_keys": status_keys,
+                "count": len(rows),
+                "table": rows,
+                "issues_scanned": len(issues),
+                "pages_fetched": pages,
+                "reporting_contract": {
+                    "do_not_claim_current_sprint": True,
+                    "do_not_add_unrequested_scope": True,
+                    "zero_is_valid": True,
+                    "status_resolved_from_catalogue": True,
+                },
             },
-        }
+            "table",
+        )
 
     @mcp.tool(
         title="List QA Workset Across Queues",
@@ -1247,22 +1371,31 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ] = None,
         stale_for_days: Annotated[
             int | None,
-            Field(ge=1, le=3650, description="Stable age threshold in days; converted to one cutoff at tool start."),
+            Field(
+                ge=1,
+                le=3650,
+                description="Stable age threshold in days; converted to one cutoff at tool start.",
+            ),
         ] = None,
         sprint_ended_before: Annotated[
             date | None,
-            Field(description="Optional exclusive cutoff for a resolved sprint end date."),
+            Field(
+                description="Optional exclusive cutoff for a resolved sprint end date."
+            ),
         ] = None,
         include_table: Annotated[
             bool,
-            Field(description="Return issue rows. Set false when only counts/coverage are requested."),
+            Field(
+                description="Return issue rows. Set false when only counts/coverage are requested."
+            ),
         ] = True,
     ) -> dict[str, Any]:
         if stale_updated_before and stale_for_days:
             raise ValueError("Use stale_updated_before or stale_for_days, not both")
         effective_updated_before = (
             date.today() - timedelta(days=stale_for_days)
-            if stale_for_days else stale_updated_before
+            if stale_for_days
+            else stale_updated_before
         )
         canonical = []
         for queue in queues:
@@ -1281,7 +1414,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             probe = f"{display} {status.key}"
             if _QA_READY_STATUS_RE.search(probe):
                 semantic_statuses.append((status.key, display, "qa_ready"))
-            elif _QA_ACTIVE_STATUS_RE.fullmatch(display) or _QA_ACTIVE_STATUS_RE.fullmatch(status.key):
+            elif _QA_ACTIVE_STATUS_RE.fullmatch(
+                display
+            ) or _QA_ACTIVE_STATUS_RE.fullmatch(status.key):
                 semantic_statuses.append((status.key, display, "qa_active"))
 
         rows_by_key: dict[str, dict[str, Any]] = {}
@@ -1297,7 +1432,14 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 while True:
                     batch = await app.issues.issues_find_filter(
                         {"queue": queue, "status": status_key},
-                        fields=["key", "summary", "status", "assignee", "sprint", "updatedAt"],
+                        fields=[
+                            "key",
+                            "summary",
+                            "status",
+                            "assignee",
+                            "sprint",
+                            "updatedAt",
+                        ],
                         per_page=100,
                         page=page,
                         auth=auth,
@@ -1305,7 +1447,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                     pages += 1
                     scanned += len(batch)
                     if scanned > max_issues_per_queue:
-                        raise ValueError(f"Queue {queue} exceeds max_issues_per_queue={max_issues_per_queue}")
+                        raise ValueError(
+                            f"Queue {queue} exceeds max_issues_per_queue={max_issues_per_queue}"
+                        )
                     for issue in batch:
                         status_matched = True
                         rows_by_key[issue.key] = {
@@ -1314,11 +1458,15 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                             "summary": issue.summary,
                             "status": issue.status.display if issue.status else display,
                             "semantic_class": semantic_class,
-                            "assignee": issue.assignee.display if issue.assignee else None,
+                            "assignee": issue.assignee.display
+                            if issue.assignee
+                            else None,
                             "updated_at": (
                                 issue.updated_at.isoformat()
                                 if hasattr(issue.updated_at, "isoformat")
-                                else str(issue.updated_at) if issue.updated_at else None
+                                else str(issue.updated_at)
+                                if issue.updated_at
+                                else None
                             ),
                             "sprints": [
                                 {"id": sprint.id, "name": sprint.display}
@@ -1330,13 +1478,19 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                         break
                     page += 1
                 if status_matched:
-                    used_statuses.append({
-                        "key": status_key,
-                        "display": display,
-                        "semantic_class": semantic_class,
-                    })
+                    used_statuses.append(
+                        {
+                            "key": status_key,
+                            "display": display,
+                            "semantic_class": semantic_class,
+                        }
+                    )
             resolved_by_queue[queue] = used_statuses
-            coverage[queue] = {"complete": True, "issues_matched": scanned, "pages_fetched": pages}
+            coverage[queue] = {
+                "complete": True,
+                "issues_matched": scanned,
+                "pages_fetched": pages,
+            }
 
         wanted_sprint_ids = {
             int(sprint["id"])
@@ -1352,18 +1506,24 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             for queue in canonical:
                 needle = queue.casefold().replace("team", "").strip("_- ")
                 for board in boards:
-                    board_name = str(board.get("name", "")).casefold().replace("team", "")
+                    board_name = (
+                        str(board.get("name", "")).casefold().replace("team", "")
+                    )
                     if needle and needle in board_name and board.get("id") is not None:
                         candidate_boards[int(board["id"])] = board
             for board_id, board in candidate_boards.items():
                 try:
-                    board_sprints = await app.issues.board_get_sprints(board_id, auth=auth)
+                    board_sprints = await app.issues.board_get_sprints(
+                        board_id, auth=auth
+                    )
                 except Exception as exc:
-                    sprint_board_errors.append({
-                        "board_id": board_id,
-                        "board_name": board.get("name"),
-                        "error_type": type(exc).__name__,
-                    })
+                    sprint_board_errors.append(
+                        {
+                            "board_id": board_id,
+                            "board_name": board.get("name"),
+                            "error_type": type(exc).__name__,
+                        }
+                    )
                     continue
                 for sprint in board_sprints:
                     sprint_id = sprint.get("id")
@@ -1388,18 +1548,24 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 else:
                     if sprint_id is not None:
                         unresolved_sprint_ids.add(sprint_id)
-                    resolved.append({
-                        "id": sprint_id,
-                        "name": sprint.get("name"),
-                        "start_date": None,
-                        "end_date": None,
-                        "dates_resolved": False,
-                    })
+                    resolved.append(
+                        {
+                            "id": sprint_id,
+                            "name": sprint.get("name"),
+                            "start_date": None,
+                            "end_date": None,
+                            "dates_resolved": False,
+                        }
+                    )
             row["sprints"] = resolved
             row["has_sprint"] = bool(resolved)
 
-        all_rows = sorted(rows_by_key.values(), key=lambda row: (row["queue"], row["key"]))
-        stale_mode = effective_updated_before is not None or sprint_ended_before is not None
+        all_rows = sorted(
+            rows_by_key.values(), key=lambda row: (row["queue"], row["key"])
+        )
+        stale_mode = (
+            effective_updated_before is not None or sprint_ended_before is not None
+        )
         rows = []
         for row in all_rows:
             reasons = []
@@ -1407,16 +1573,21 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             if effective_updated_before and updated_text:
                 try:
                     if date.fromisoformat(updated_text[:10]) < effective_updated_before:
-                        reasons.append(f"updated_before:{effective_updated_before.isoformat()}")
+                        reasons.append(
+                            f"updated_before:{effective_updated_before.isoformat()}"
+                        )
                 except ValueError:
                     pass
             if sprint_ended_before:
-                ended = sorted({
-                    sprint["end_date"][:10]
-                    for sprint in row["sprints"]
-                    if sprint.get("end_date")
-                    and date.fromisoformat(sprint["end_date"][:10]) < sprint_ended_before
-                })
+                ended = sorted(
+                    {
+                        sprint["end_date"][:10]
+                        for sprint in row["sprints"]
+                        if sprint.get("end_date")
+                        and date.fromisoformat(sprint["end_date"][:10])
+                        < sprint_ended_before
+                    }
+                )
                 reasons.extend(f"sprint_ended:{value}" for value in ended)
             row["stale_reasons"] = reasons
             if not stale_mode or reasons:
@@ -1440,11 +1611,13 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 "sprint_dates": sprint_text,
             }
             if stale_mode:
-                compact.update({
-                    "title": row["summary"],
-                    "updated_at": row["updated_at"],
-                    "stale_reasons": row["stale_reasons"],
-                })
+                compact.update(
+                    {
+                        "title": row["summary"],
+                        "updated_at": row["updated_at"],
+                        "stale_reasons": row["stale_reasons"],
+                    }
+                )
             compact_rows.append(compact)
         counts = Counter((row["queue"], row["semantic_class"]) for row in all_rows)
         returned_counts = Counter(row["queue"] for row in rows)
@@ -1455,8 +1628,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "queues": canonical,
             "resolved_statuses": {
                 queue: [
-                    f"{item['display']} ({item['semantic_class']})"
-                    for item in items
+                    f"{item['display']} ({item['semantic_class']})" for item in items
                 ]
                 for queue, items in resolved_by_queue.items()
             },
@@ -1472,14 +1644,27 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "returned_total": len(rows),
             "returned_counts": {queue: returned_counts[queue] for queue in canonical},
             "filter": {
-                "stale_updated_before": effective_updated_before.isoformat() if effective_updated_before else None,
+                "stale_updated_before": effective_updated_before.isoformat()
+                if effective_updated_before
+                else None,
                 "stale_for_days": stale_for_days,
-                "sprint_ended_before": sprint_ended_before.isoformat() if sprint_ended_before else None,
+                "sprint_ended_before": sprint_ended_before.isoformat()
+                if sprint_ended_before
+                else None,
                 "logic": "OR",
             },
             "table_columns": (
-                ["queue", "key", "title", "assignee", "sprint_dates", "updated_at", "stale_reasons"]
-                if stale_mode else ["queue", "key", "assignee", "sprint_dates"]
+                [
+                    "queue",
+                    "key",
+                    "title",
+                    "assignee",
+                    "sprint_dates",
+                    "updated_at",
+                    "stale_reasons",
+                ]
+                if stale_mode
+                else ["queue", "key", "assignee", "sprint_dates"]
             ),
             "table": compact_rows if include_table else [],
             "table_omitted": not include_table,
@@ -1518,8 +1703,12 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     async def issues_count_current_sprint_status(
         ctx: Context[Any, AppContext],
         queue: Annotated[str, Field(min_length=1, description="Queue key")],
-        status: Annotated[str, Field(min_length=1, description="Exact displayed status name")],
-        board_id: Annotated[int | None, Field(gt=0, description="Optional explicit board id")] = None,
+        status: Annotated[
+            str, Field(min_length=1, description="Exact displayed status name")
+        ],
+        board_id: Annotated[
+            int | None, Field(gt=0, description="Optional explicit board id")
+        ] = None,
     ) -> dict[str, Any]:
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
             raise ValueError("queue must be a Yandex Tracker queue key")
@@ -1529,13 +1718,17 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         if board_id is None:
             needle = queue.casefold().replace("team", "").strip("_- ")
             candidates = [
-                board for board in boards
-                if needle and needle in str(board.get("name", "")).casefold().replace("team", "")
+                board
+                for board in boards
+                if needle
+                and needle in str(board.get("name", "")).casefold().replace("team", "")
             ]
             primary_name = f"{needle} sprint"
             primary = [
-                board for board in candidates
-                if " ".join(str(board.get("name", "")).casefold().split()) == primary_name
+                board
+                for board in candidates
+                if " ".join(str(board.get("name", "")).casefold().split())
+                == primary_name
             ]
             if len(primary) == 1:
                 candidates = primary
@@ -1553,19 +1746,27 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             selected = candidates[0]
             board_id = int(selected["id"])
         else:
-            selected = next((board for board in boards if int(board.get("id", -1)) == board_id), None)
+            selected = next(
+                (board for board in boards if int(board.get("id", -1)) == board_id),
+                None,
+            )
             if selected is None:
                 raise ValueError(f"Board {board_id} not found")
 
         sprints = await issues_api.board_get_sprints(board_id, auth=auth)
         today = date.today().isoformat()
         active = [
-            sprint for sprint in sprints
-            if str(sprint.get("startDate", "")) <= today <= str(sprint.get("endDate", ""))
+            sprint
+            for sprint in sprints
+            if str(sprint.get("startDate", ""))
+            <= today
+            <= str(sprint.get("endDate", ""))
         ]
         if len(active) != 1:
             return {
-                "status": "ambiguous_active_sprint" if active else "active_sprint_not_found",
+                "status": "ambiguous_active_sprint"
+                if active
+                else "active_sprint_not_found",
                 "complete": False,
                 "queue": queue,
                 "board": {"id": board_id, "name": selected.get("name")},
@@ -1596,8 +1797,11 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             page += 1
         wanted_status = " ".join(status.casefold().split())
         matched = [
-            issue for issue in issues
-            if issue.status and " ".join((issue.status.display or "").casefold().split()) == wanted_status
+            issue
+            for issue in issues
+            if issue.status
+            and " ".join((issue.status.display or "").casefold().split())
+            == wanted_status
         ]
         rows = [
             {
@@ -1616,7 +1820,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "sprint": {"id": sprint.get("id"), "name": sprint.get("name")},
             "issue_status": {
                 "display": status,
-                "matched_keys": sorted({issue.status.key for issue in matched if issue.status}),
+                "matched_keys": sorted(
+                    {issue.status.key for issue in matched if issue.status}
+                ),
             },
             "count": len(rows),
             "table": rows,
@@ -1642,7 +1848,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     async def issues_summarize_numeric_field_by_version(
         ctx: Context[Any, AppContext],
         queue: Annotated[str, Field(min_length=1, description="Queue key")],
-        version_id: Annotated[int, Field(gt=0, description="Version id from queue_get_versions")],
+        version_id: Annotated[
+            int, Field(gt=0, description="Version id from queue_get_versions")
+        ],
         numeric_field: Annotated[
             str,
             Field(
@@ -1712,26 +1920,30 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 )
 
         rows.sort(key=lambda row: (-float(row["value"]), row["key"]))
-        return {
-            "status": "complete",
-            "filter": filters,
-            "issues_in_release": len(issues),
-            "issues_with_nonzero_value": len(rows),
-            "issues_without_value": missing,
-            "missing_value_policy": "optional empty numeric value is counted as zero",
-            "sum": int(total) if total.is_integer() else total,
-            "field": numeric_field,
-            "evidence": rows,
-            "all_issue_keys": sorted(seen),
-            "all_issue_keys_sha256": hashlib.sha256(
-                "\n".join(sorted(seen)).encode("utf-8")
-            ).hexdigest(),
-            "coverage": {
-                "processed_issues": len(issues),
-                "complete": True,
-                "pages_fetched": page,
+        return _cap_rows_for_budget(
+            {
+                "status": "complete",
+                "filter": filters,
+                "issues_in_release": len(issues),
+                "issues_with_nonzero_value": len(rows),
+                "issues_without_value": missing,
+                "missing_value_policy": "optional empty numeric value is counted as zero",
+                "sum": int(total) if total.is_integer() else total,
+                "field": numeric_field,
+                "evidence": rows,
+                "all_issue_keys": sorted(seen),
+                "all_issue_keys_sha256": hashlib.sha256(
+                    "\n".join(sorted(seen)).encode("utf-8")
+                ).hexdigest(),
+                "coverage": {
+                    "processed_issues": len(issues),
+                    "complete": True,
+                    "pages_fetched": page,
+                },
             },
-        }
+            "evidence",
+            "all_issue_keys",
+        )
 
     @mcp.tool(
         title="Summarize Effort for an Epic or Release",
@@ -1752,14 +1964,22 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     )
     async def issues_summarize_effort(
         ctx: Context[Any, AppContext],
-        scope: Annotated[Literal["epic", "release"], Field(description="Aggregation scope")],
+        scope: Annotated[
+            Literal["epic", "release"], Field(description="Aggregation scope")
+        ],
         measure: Annotated[
             Literal["estimation", "spent"],
             Field(description="Planned estimate or actual time spent"),
         ],
-        epic_key: Annotated[str | None, Field(description="Epic issue key for scope=epic")] = None,
-        queue: Annotated[str | None, Field(description="Queue key for scope=release")] = None,
-        version_id: Annotated[int | None, Field(gt=0, description="Version id for scope=release")] = None,
+        epic_key: Annotated[
+            str | None, Field(description="Epic issue key for scope=epic")
+        ] = None,
+        queue: Annotated[
+            str | None, Field(description="Queue key for scope=release")
+        ] = None,
+        version_id: Annotated[
+            int | None, Field(gt=0, description="Version id for scope=release")
+        ] = None,
         max_issues: Annotated[int, Field(ge=1, le=10_000)] = 2_000,
         issue_keys: Annotated[
             list[str] | None,
@@ -1775,7 +1995,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ] = None,
     ) -> dict[str, Any]:
         if scope == "epic":
-            if not epic_key or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*-\d+", epic_key):
+            if not epic_key or not re.fullmatch(
+                r"[A-Za-z][A-Za-z0-9_-]*-\d+", epic_key
+            ):
                 raise ValueError("scope=epic requires a valid epic_key")
             filters: dict[str, object] = {"epic": epic_key}
         else:
@@ -1854,34 +2076,39 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         if issue_keys:
             key_set = set(issue_keys)
             rows = [row for row in rows if row["key"] in key_set]
-        return {
-            "status": "complete",
-            "scope": scope,
-            "filter": filters,
-            "measure": measure,
-            "measure_meaning": (
-                "planned estimate" if measure == "estimation" else "actual time spent"
-            ),
-            "total_hours": round(total_hours, 2),
-            "issues_total": len(issues),
-            "issues_with_value": issues_with_value,
-            "issues_without_value": len(issues) - issues_with_value,
-            "table": rows,
-            "coverage": {
-                "processed_issues": len(issues),
-                "complete": True,
-                "pages_fetched": page,
-                "filtered_keys": bool(issue_keys),
-                "all_issue_keys_sha256": hashlib.sha256(
-                    "\n".join(sorted(seen)).encode("utf-8")
-                ).hexdigest(),
+        return _cap_rows_for_budget(
+            {
+                "status": "complete",
+                "scope": scope,
+                "filter": filters,
+                "measure": measure,
+                "measure_meaning": (
+                    "planned estimate"
+                    if measure == "estimation"
+                    else "actual time spent"
+                ),
+                "total_hours": round(total_hours, 2),
+                "issues_total": len(issues),
+                "issues_with_value": issues_with_value,
+                "issues_without_value": len(issues) - issues_with_value,
+                "table": rows,
+                "coverage": {
+                    "processed_issues": len(issues),
+                    "complete": True,
+                    "pages_fetched": page,
+                    "filtered_keys": bool(issue_keys),
+                    "all_issue_keys_sha256": hashlib.sha256(
+                        "\n".join(sorted(seen)).encode("utf-8")
+                    ).hexdigest(),
+                },
+                "reporting_contract": {
+                    "do_not_confuse_estimation_and_spent": True,
+                    "state_measure_explicitly": True,
+                    "report_processed_issue_count": True,
+                },
             },
-            "reporting_contract": {
-                "do_not_confuse_estimation_and_spent": True,
-                "state_measure_explicitly": True,
-                "report_processed_issue_count": True,
-            },
-        }
+            "table",
+        )
 
     @mcp.tool(
         title="Count Testing Returns in a Release",
@@ -1905,7 +2132,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     async def issues_count_release_status_returns(
         ctx: Context[Any, AppContext],
         queue: Annotated[str, Field(min_length=1, description="Queue key")],
-        version_id: Annotated[int, Field(gt=0, description="Version id from queue_get_versions")],
+        version_id: Annotated[
+            int, Field(gt=0, description="Version id from queue_get_versions")
+        ],
         metric: Annotated[
             Literal["qa_rework_cycle", "testing_rework", "repeated_work_status"],
             Field(
@@ -1947,8 +2176,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             {"from": "Можно тестировать", "to": "Ревью"},
         ]
         allowed_pairs = {
-            (pair["from"].casefold(), pair["to"].casefold())
-            for pair in display_pairs
+            (pair["from"].casefold(), pair["to"].casefold()) for pair in display_pairs
         }
         working_statuses = {
             name.casefold()
@@ -2030,7 +2258,8 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                     if source is not None and target is not None:
                         if metric == "testing_rework":
                             is_return = (
-                                source.casefold(), target.casefold()
+                                source.casefold(),
+                                target.casefold(),
                             ) in allowed_pairs
                         elif target.casefold() in working_statuses:
                             visited_work_statuses[target.casefold()] += 1
@@ -2055,14 +2284,20 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                     source = event["from"]
                     target = event["to"]
                     if phase == "waiting_for_test":
-                        if source.casefold() == "тестируется" and target.casefold() == "провал":
+                        if (
+                            source.casefold() == "тестируется"
+                            and target.casefold() == "провал"
+                        ):
                             phase = "failed"
                             cycle_events = [event]
                         elif target.casefold() == "тестируется":
                             phase = "testing"
                             cycle_events = [event]
                     elif phase == "testing":
-                        if source.casefold() == "тестируется" and target.casefold() == "провал":
+                        if (
+                            source.casefold() == "тестируется"
+                            and target.casefold() == "провал"
+                        ):
                             phase = "failed"
                             cycle_events.append(event)
                         elif target.casefold() == "тестируется":
@@ -2082,11 +2317,19 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                                     "cycle": name,
                                     "started_at": cycle_events[0].get("updated_at"),
                                     "failed_at": next(
-                                        (item.get("updated_at") for item in cycle_events if item["to"].casefold() == "провал"),
+                                        (
+                                            item.get("updated_at")
+                                            for item in cycle_events
+                                            if item["to"].casefold() == "провал"
+                                        ),
                                         None,
                                     ),
                                     "returned_to_work_at": next(
-                                        (item.get("updated_at") for item in cycle_events if item["to"].casefold() == "в работе"),
+                                        (
+                                            item.get("updated_at")
+                                            for item in cycle_events
+                                            if item["to"].casefold() == "в работе"
+                                        ),
                                         None,
                                     ),
                                     "retested_at": event.get("updated_at"),
@@ -2103,7 +2346,8 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                     "transition": "; ".join(
                         f"{name} ({amount})" if amount > 1 else name
                         for name, amount in sorted(transition_counts.items())
-                    ) or "—",
+                    )
+                    or "—",
                     "transition_counts": dict(sorted(transition_counts.items())),
                     "url": f"https://tracker.yandex.ru/{issue.key}",
                     "evidence": evidence,
@@ -2116,36 +2360,43 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 row.pop("evidence", None)
         if returned_only:
             table = [row for row in table if row["return_count"] > 0]
-        return {
-            "status": "complete",
-            "filter": filters,
-            "definition": {
-                "metric": metric,
-                "return_transitions": display_pairs if metric == "testing_rework" else None,
-                "working_statuses": sorted(working_statuses) if metric == "repeated_work_status" else None,
-                "rule": (
-                    "count one completed Тестируется→Провал→В работе→…→Тестируется loop once"
-                    if metric == "qa_rework_cycle"
-                    else (
-                        "count only the listed exact from/to pairs"
-                        if metric == "testing_rework"
-                        else "for each working status, count every visit after its first visit"
-                    )
-                ),
+        return _cap_rows_for_budget(
+            {
+                "status": "complete",
+                "filter": filters,
+                "definition": {
+                    "metric": metric,
+                    "return_transitions": display_pairs
+                    if metric == "testing_rework"
+                    else None,
+                    "working_statuses": sorted(working_statuses)
+                    if metric == "repeated_work_status"
+                    else None,
+                    "rule": (
+                        "count one completed Тестируется→Провал→В работе→…→Тестируется loop once"
+                        if metric == "qa_rework_cycle"
+                        else (
+                            "count only the listed exact from/to pairs"
+                            if metric == "testing_rework"
+                            else "for each working status, count every visit after its first visit"
+                        )
+                    ),
+                },
+                "issues_in_release": len(issues),
+                "issues_with_returns": sum(row["return_count"] > 0 for row in table),
+                "total_returns": total_returns,
+                "table": table,
+                "coverage": {
+                    "processed_issues": len(issues),
+                    "complete": True,
+                    "returned_only": returned_only,
+                    "all_issue_keys_sha256": hashlib.sha256(
+                        "\n".join(sorted(seen)).encode("utf-8")
+                    ).hexdigest(),
+                },
             },
-            "issues_in_release": len(issues),
-            "issues_with_returns": sum(row["return_count"] > 0 for row in table),
-            "total_returns": total_returns,
-            "table": table,
-            "coverage": {
-                "processed_issues": len(issues),
-                "complete": True,
-                "returned_only": returned_only,
-                "all_issue_keys_sha256": hashlib.sha256(
-                    "\n".join(sorted(seen)).encode("utf-8")
-                ).hexdigest(),
-            },
-        }
+            "table",
+        )
 
     @mcp.tool(
         title="Analyze Issue Description Field Exhaustively",
@@ -2164,7 +2415,10 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ctx: Context[Any, AppContext],
         queue: Annotated[
             str,
-            Field(description="Yandex Tracker queue key, for example YOURQUEUE", min_length=1),
+            Field(
+                description="Yandex Tracker queue key, for example YOURQUEUE",
+                min_length=1,
+            ),
         ],
         field_label: Annotated[
             str,
@@ -2187,9 +2441,13 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ] = None,
         date_to: Annotated[
             date | None,
-            Field(description="Inclusive end date in YYYY-MM-DD; normally today's date"),
+            Field(
+                description="Inclusive end date in YYYY-MM-DD; normally today's date"
+            ),
         ] = None,
-        top_n: Annotated[int, Field(description="Number of most frequent values", ge=1, le=50)] = 15,
+        top_n: Annotated[
+            int, Field(description="Number of most frequent values", ge=1, le=50)
+        ] = 15,
         max_issues: Annotated[
             int,
             Field(
@@ -2226,7 +2484,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 )
             for issue in batch:
                 if not issue.key:
-                    raise RuntimeError(f"Incomplete scan: issue without key on page {page}.")
+                    raise RuntimeError(
+                        f"Incomplete scan: issue without key on page {page}."
+                    )
                 if issue.key in seen_keys:
                     raise RuntimeError(
                         f"Unstable pagination: duplicate issue {issue.key} on page {page}."
@@ -2287,7 +2547,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     async def issue_get_worklogs(
         ctx: Context[Any, AppContext],
         issue_ids: IssueIDs,
-    ) -> dict[str, list[Worklog]]:
+    ) -> dict[str, Any]:
         for issue_id in issue_ids:
             check_issue_access(settings, issue_id)
 
@@ -2301,6 +2561,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             )
             result[issue_id] = worklogs or []
 
+        result, truncated_entries = _cap_worklogs_for_budget(result)
+        if truncated_entries:
+            result["_truncated_entries"] = truncated_entries
         return result
 
     @mcp.tool(

@@ -481,3 +481,24 @@ Fork (plohoy) — local fixes on top of v0.7.1:
 
 ### Documentation
 - Comprehensive README documentation
+
+## [0.7.1.post2] - 2026-08-20
+
+Response-size audit (no in-session truncation): Hermes truncates tool results
+above context_length*4*0.15 chars (39,321 on a 64K-token model) with an
+unavailable sandbox fallback; every list-returning tool now self-caps at
+35,000 serialized chars and reports the cap in coverage:
+
+- `_cap_rows_for_budget` helper: tail-trims rows (pre-sorted by relevance) via
+  binary search until the serialized response fits; counters stay complete,
+  coverage gains rows_capped/rows_total_*/rows_returned_*.
+- Applied to: `issues_count_release_status_returns`, `issues_summarize_effort`,
+  `issues_summarize_numeric_field_by_version` (evidence + all_issue_keys),
+  `issues_list_qa_workset`, `issues_count_queue_status`, `issues_assigned_open`,
+  `issues_created_open` (matches).
+- `issue_get_comments` now returns {status, issue_id, total_comments, comments,
+  coverage} with the same cap (was a bare uncapped list).
+- `issue_get_worklogs` caps total entries and reports per-key totals in
+  `_truncated_entries` when partial.
+- 11 boundary tests: exactly-at-budget (no cap), just-over (cap engages),
+  giant single row, multiple list keys, pydantic-model rows, counters intact.

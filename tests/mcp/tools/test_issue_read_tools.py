@@ -94,9 +94,11 @@ class TestIssueGetComments:
         assert not result.isError
         mock_issues_protocol.issue_get_comments.assert_called_once()
         content = get_tool_result_content(result)
-        assert isinstance(content, list)
-        assert len(content) == len(sample_comments)
-        assert content[0]["text"] == sample_comments[0].text
+        assert isinstance(content, dict)
+        assert content["status"] == "complete"
+        assert content["total_comments"] == len(sample_comments)
+        assert len(content["comments"]) == len(sample_comments)
+        assert content["comments"][0]["text"] == sample_comments[0].text
 
     async def test_restricted_queue_raises_error(
         self,
