@@ -165,7 +165,7 @@ class TestIssuesFind:
         assert not result.isError
         call_kwargs = mock_issues_protocol.issues_find.call_args.kwargs
         assert call_kwargs["page"] == 2
-        assert call_kwargs["per_page"] == 50
+        assert call_kwargs["per_page"] == 20  # fork: per_page clamped to max 20
         content = get_tool_result_content(result)
         assert len(content) == len(sample_issues)
 
