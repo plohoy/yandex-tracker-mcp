@@ -6,7 +6,7 @@ import logging
 import re
 import sys
 from collections import Counter, defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
 from mcp.server import FastMCP
@@ -655,6 +655,25 @@ def _reference_display(value: Any) -> str | None:
     return str(display) if display else None
 
 
+def _to_utc(value: Any) -> Any:
+    """Normalize a datetime to UTC-aware for cutoff comparison (naive = UTC)."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_updated_before(value: str) -> Any:
+    """Parse an ISO date/datetime cutoff; fail-closed on garbage input."""
+    text = value.strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(
+            f"updated_before must be an ISO date or datetime, got {value!r}"
+        ) from None
+    return _to_utc(parsed)
+
+
 async def _open_issues_by_person_core(
     issues_api: Any,
     auth: Any,
@@ -662,6 +681,7 @@ async def _open_issues_by_person_core(
     users_api: Any | None = None,
     person: str | None = None,
     role: str,
+    updated_before: str | None = None,
 ) -> dict[str, Any]:
     """Shared implementation of issues_assigned_open / issues_created_open.
 
@@ -893,6 +913,19 @@ async def _open_issues_by_person_core(
             open_issues.append(issue)
 
     open_issues.sort(key=lambda issue: issue.key or "")
+    counts = {
+        total_label: len(issues_by_key),
+        "open": len(open_issues),
+        "final": dict(final_counts),
+        "unknown_status_type_included_as_open": unknown_type,
+    }
+    if updated_before is not None:
+        cutoff = _parse_updated_before(updated_before)
+        open_issues = [
+            issue
+            for issue in open_issues
+            if issue.updated_at is None or _to_utc(issue.updated_at) < cutoff
+        ]
     matches: list[dict[str, Any]] = []
     for issue in open_issues:
         updated_at = issue.updated_at
@@ -926,12 +959,6 @@ async def _open_issues_by_person_core(
             }
         )
 
-    counts = {
-        total_label: len(issues_by_key),
-        "open": len(open_issues),
-        "final": dict(final_counts),
-        "unknown_status_type_included_as_open": unknown_type,
-    }
     coverage = (
         {"complete": True, "reason": None}
         if complete
@@ -943,6 +970,10 @@ async def _open_issues_by_person_core(
             ),
         }
     )
+    if updated_before is not None:
+        coverage["updated_before"] = updated_before
+        coverage["open_after_filter"] = len(open_issues)
+        coverage["filtered_out"] = counts["open"] - len(open_issues)
     return envelope(
         "ok" if matches else "no_open_issues",
         matches,
@@ -959,6 +990,7 @@ async def issues_assigned_open_core(
     *,
     users_api: Any | None = None,
     assignee: str | None = None,
+    updated_before: str | None = None,
 ) -> dict[str, Any]:
     """Open issues assigned to a user (see _open_issues_by_person_core)."""
     return await _open_issues_by_person_core(
@@ -967,6 +999,7 @@ async def issues_assigned_open_core(
         users_api=users_api,
         person=assignee,
         role="assignee",
+        updated_before=updated_before,
     )
 
 
@@ -976,6 +1009,7 @@ async def issues_created_open_core(
     *,
     users_api: Any | None = None,
     creator: str | None = None,
+    updated_before: str | None = None,
 ) -> dict[str, Any]:
     """Open issues created by a user (see _open_issues_by_person_core)."""
     return await _open_issues_by_person_core(
@@ -984,6 +1018,7 @@ async def issues_created_open_core(
         users_api=users_api,
         person=creator,
         role="creator",
+        updated_before=updated_before,
     )
 
 
@@ -1178,6 +1213,20 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 max_length=128,
             ),
         ] = None,
+        updated_before: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional ISO date/datetime cutoff (e.g. '2026-06-20'). "
+                    "When set, only open issues whose updated_at is strictly "
+                    "older than the cutoff are returned. The filter runs "
+                    "server-side BEFORE the response-size cap, so stale-task "
+                    "queries never lose rows to capping. Issues without "
+                    "updated_at are kept. counts still cover all open issues; "
+                    "coverage reports open_after_filter and filtered_out."
+                ),
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         lifespan = ctx.request_context.lifespan_context
         return await issues_assigned_open_core(
@@ -1185,6 +1234,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             auth=get_yandex_auth(ctx),
             users_api=lifespan.users,
             assignee=assignee,
+            updated_before=updated_before,
         )
 
     @mcp.tool(
@@ -1218,6 +1268,20 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 max_length=128,
             ),
         ] = None,
+        updated_before: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional ISO date/datetime cutoff (e.g. '2026-06-20'). "
+                    "When set, only open issues whose updated_at is strictly "
+                    "older than the cutoff are returned. The filter runs "
+                    "server-side BEFORE the response-size cap, so stale-task "
+                    "queries never lose rows to capping. Issues without "
+                    "updated_at are kept. counts still cover all open issues; "
+                    "coverage reports open_after_filter and filtered_out."
+                ),
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         lifespan = ctx.request_context.lifespan_context
         return await issues_created_open_core(
@@ -1225,6 +1289,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             auth=get_yandex_auth(ctx),
             users_api=lifespan.users,
             creator=creator,
+            updated_before=updated_before,
         )
 
     @mcp.tool(

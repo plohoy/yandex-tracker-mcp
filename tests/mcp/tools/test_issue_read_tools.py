@@ -304,3 +304,69 @@ class TestIssueGetTransitions:
         assert len(content) == len(sample_transitions)
         assert content[0]["id"] == sample_transitions[0].id
         assert content[0]["display"] == sample_transitions[0].display
+
+
+class TestAssignedOpenUpdatedBefore:
+    async def test_updated_before_filters_matches(
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_users_protocol: AsyncMock,
+    ) -> None:
+        from datetime import datetime, timezone
+
+        from mcp_tracker.tracker.proto.types.issues import Issue, StatusReference
+        from mcp_tracker.tracker.proto.types.users import User
+
+        def make(key: str, updated) -> Issue:
+            return Issue.model_construct(
+                id=key,
+                version=1,
+                key=key,
+                summary=key,
+                updated_at=updated,
+                status=StatusReference.model_construct(
+                    id="1", key="open", display="Open"
+                ),
+            )
+
+        issues = [
+            make("TEST-1", datetime(2026, 1, 1, tzinfo=timezone.utc)),  # stale
+            make("TEST-2", datetime(2026, 8, 1, tzinfo=timezone.utc)),  # fresh
+            make("TEST-3", None),  # no updated_at -> kept conservatively
+        ]
+        mock_issues_protocol.issues_find_filter = AsyncMock(return_value=issues)
+        mock_users_protocol.users_list = AsyncMock(
+            return_value=[User.model_construct(login="tester", display="Tester")]
+        )
+
+        result = await client_session.call_tool(
+            "issues_assigned_open",
+            {"assignee": "tester", "updated_before": "2026-06-20"},
+        )
+
+        assert not result.isError
+        content = get_tool_result_content(result)
+        assert [m["key"] for m in content["matches"]] == ["TEST-1", "TEST-3"]
+        assert content["coverage"]["updated_before"] == "2026-06-20"
+        assert content["coverage"]["open_after_filter"] == 2
+        assert content["coverage"]["filtered_out"] == 1
+        assert content["counts"]["open"] == 3  # unfiltered counts intact
+
+    async def test_updated_before_invalid_input_fails_closed(
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_users_protocol: AsyncMock,
+    ) -> None:
+        from mcp_tracker.tracker.proto.types.users import User
+
+        mock_users_protocol.users_list = AsyncMock(
+            return_value=[User.model_construct(login="tester", display="Tester")]
+        )
+        mock_issues_protocol.issues_find_filter = AsyncMock(return_value=[])
+
+        result = await client_session.call_tool(
+            "issues_assigned_open", {"assignee": "tester", "updated_before": "banana"}
+        )
+        assert result.isError
