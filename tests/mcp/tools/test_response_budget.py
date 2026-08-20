@@ -13,10 +13,9 @@ huge single row (degrades to empty), multiple list keys, counters intact.
 """
 
 import json
-
-import pytest
-from mcp.client.session import ClientSession
 from unittest.mock import AsyncMock
+
+from mcp.client.session import ClientSession
 
 from mcp_tracker.mcp.tools.issue_read import (
     _RESPONSE_BUDGET_CHARS,
