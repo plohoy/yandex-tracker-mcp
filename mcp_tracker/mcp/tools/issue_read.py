@@ -104,11 +104,14 @@ def _duration_hours(value: object) -> float:
 # In-session tool results are truncated by Hermes above a context-scaled
 # budget (39,321 chars on a 64K-token model: window*4*0.15); the sandbox
 # persistence path is unavailable here, so oversized results become a broken
-# 1.5K preview. Every list-returning tool must keep its serialized response
-# under this budget — rows are pre-sorted by relevance and tail-trimmed, with
-# the cap reported in coverage so callers never mistake a partial table for a
-# complete one.
-_RESPONSE_BUDGET_CHARS: int = 35_000
+# 1.5K preview. Hermes counts the WRAPPED form (result-string + structured
+# content + untrusted wrapper), which measures ~1.3x the raw ensure_ascii=True
+# serialization used below (verified: 45,072 wrapped vs 34,684 raw on the same
+# payload). Budget 28,000 raw keeps the wrapped size ~36.4K — safely under the
+# threshold — so every list-returning tool caps its own rows (pre-sorted by
+# relevance, tail-trimmed) and reports the cap in coverage; callers never
+# mistake a partial table for a complete one.
+_RESPONSE_BUDGET_CHARS: int = 28_000
 
 
 def _model_dump_jsonable(value: Any) -> Any:
