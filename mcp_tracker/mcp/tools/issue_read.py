@@ -1253,7 +1253,11 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "open_definition so the meaning is verbatim. Read-only; it never "
             "accepts or builds visible queries and never writes. Report "
             "counts.assigned_total and counts.open verbatim together with "
-            "the returned matches."
+            "the returned matches. The response contains ALL matching rows: "
+            "if coverage.rows_capped is ABSENT, 'matches' is complete — do "
+            "NOT re-call this tool with page/per_page, render the answer "
+            "from the data you already have. Re-fetching the same data "
+            "bloats the context and can exceed the model's memory limit."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -1293,11 +1297,10 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 ge=1,
                 le=200,
                 description=(
-                    "Rows per page. Pass it together with page to walk large "
-                    "result sets in separate calls: coverage.total_rows and "
-                    "coverage.pages_total tell you when to stop. Without it a "
-                    "single call returns as many rows as fit the response "
-                    "budget (coverage.rows_capped=true when trimmed)."
+                    "Rows per page. Use ONLY when a previous call reported "
+                    "coverage.rows_capped=true (or total_rows exceeds the "
+                    "returned matches). Never use it to re-fetch data you "
+                    "already have — the unfiltered response is complete."
                 ),
             ),
         ] = None,
@@ -1328,7 +1331,11 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "open_definition so the meaning is verbatim. Read-only; it never "
             "accepts or builds visible queries and never writes. Report "
             "counts.created_total and counts.open verbatim together with "
-            "the returned matches."
+            "the returned matches. The response contains ALL matching rows: "
+            "if coverage.rows_capped is ABSENT, 'matches' is complete — do "
+            "NOT re-call this tool with page/per_page, render the answer "
+            "from the data you already have. Re-fetching the same data "
+            "bloats the context and can exceed the model's memory limit."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -1368,11 +1375,10 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 ge=1,
                 le=200,
                 description=(
-                    "Rows per page. Pass it together with page to walk large "
-                    "result sets in separate calls: coverage.total_rows and "
-                    "coverage.pages_total tell you when to stop. Without it a "
-                    "single call returns as many rows as fit the response "
-                    "budget (coverage.rows_capped=true when trimmed)."
+                    "Rows per page. Use ONLY when a previous call reported "
+                    "coverage.rows_capped=true (or total_rows exceeds the "
+                    "returned matches). Never use it to re-fetch data you "
+                    "already have — the unfiltered response is complete."
                 ),
             ),
         ] = None,
