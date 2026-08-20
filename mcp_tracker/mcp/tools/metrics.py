@@ -17,7 +17,6 @@ reporting_contract, list fields self-capped to the response budget
 (rows_capped in coverage), counters always complete.
 """
 
-import hashlib
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
@@ -419,7 +418,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 max_length=10,
                 description="Issue type keys counted as bugs",
             ),
-        ] = ["bug"],
+        ] = Field(default_factory=lambda: ["bug"]),
         group_by: Annotated[
             Literal["week", "month"], Field(description="Trend bucket")
         ] = "week",
