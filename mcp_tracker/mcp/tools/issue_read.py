@@ -1761,6 +1761,18 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         queue: Annotated[str | None, Field(description="Queue key for scope=release")] = None,
         version_id: Annotated[int | None, Field(gt=0, description="Version id for scope=release")] = None,
         max_issues: Annotated[int, Field(ge=1, le=10_000)] = 2_000,
+        issue_keys: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Optional filter: return table rows only for these issue keys "
+                    "(e.g. the returned tasks already known from "
+                    "issues_count_release_status_returns). Shrinks the response to "
+                    "a few KB and avoids in-session truncation of large releases. "
+                    "Totals still cover the whole release."
+                ),
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         if scope == "epic":
             if not epic_key or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*-\d+", epic_key):
@@ -1838,6 +1850,10 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                     }
                 )
         rows.sort(key=lambda row: (-row["hours"], row["key"]))
+        issues_with_value = len(rows)
+        if issue_keys:
+            key_set = set(issue_keys)
+            rows = [row for row in rows if row["key"] in key_set]
         return {
             "status": "complete",
             "scope": scope,
@@ -1848,13 +1864,14 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             ),
             "total_hours": round(total_hours, 2),
             "issues_total": len(issues),
-            "issues_with_value": len(rows),
-            "issues_without_value": len(issues) - len(rows),
+            "issues_with_value": issues_with_value,
+            "issues_without_value": len(issues) - issues_with_value,
             "table": rows,
             "coverage": {
                 "processed_issues": len(issues),
                 "complete": True,
                 "pages_fetched": page,
+                "filtered_keys": bool(issue_keys),
                 "all_issue_keys_sha256": hashlib.sha256(
                     "\n".join(sorted(seen)).encode("utf-8")
                 ).hexdigest(),
