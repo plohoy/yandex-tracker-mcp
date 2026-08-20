@@ -121,8 +121,9 @@ def _model_dump_jsonable(value: Any) -> Any:
 
 
 def _response_size(obj: Any) -> int:
-    """Length of the response as it will be serialized into the conversation."""
-    return len(json.dumps(obj, ensure_ascii=False, default=_model_dump_jsonable))
+    """Length of the response as the MCP layer will serialize it into the
+    conversation (ensure_ascii=True — Cyrillic inflates ~2.3x via \\uXXXX)."""
+    return len(json.dumps(obj, default=_model_dump_jsonable))
 
 
 def _cap_rows_for_budget(
