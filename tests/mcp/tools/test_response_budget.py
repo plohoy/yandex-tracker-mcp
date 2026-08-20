@@ -233,3 +233,110 @@ class TestToolResponsesFitBudget:
         assert len(json.dumps(content, ensure_ascii=False)) <= BUDGET
         assert content["coverage"]["rows_capped"] is True
         assert content["counts"]["open"] >= 299
+
+    async def test_assigned_open_pagination_walks_full_set(
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_users_protocol: AsyncMock,
+    ) -> None:
+        from mcp_tracker.tracker.proto.types.users import User
+
+        issues = [_issue(f"TEST-{i}", summary="s" * 200) for i in range(1, 67)]
+        mock_users_protocol.users_list = AsyncMock(
+            return_value=[User.model_construct(login="tester", display="Tester")]
+        )
+        mock_issues_protocol.issues_find_filter = AsyncMock(return_value=issues)
+        page1 = get_tool_result_content(
+            await client_session.call_tool(
+                "issues_assigned_open",
+                {"assignee": "tester", "page": 1, "per_page": 40},
+            )
+        )
+        mock_issues_protocol.issues_find_filter = AsyncMock(return_value=issues)
+        page2 = get_tool_result_content(
+            await client_session.call_tool(
+                "issues_assigned_open",
+                {"assignee": "tester", "page": 2, "per_page": 40},
+            )
+        )
+
+        assert len(page1["matches"]) == 40
+        assert len(page2["matches"]) == 26
+        assert page1["coverage"]["total_rows"] == 66
+        assert page1["coverage"]["pages_total"] == 2
+        assert page1["counts"]["open"] == 66  # global counts on every page
+        keys = [m["key"] for m in page1["matches"]] + [
+            m["key"] for m in page2["matches"]
+        ]
+        assert len(set(keys)) == 66  # no overlap, no loss
+
+    async def test_count_release_pagination(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        issues = [_issue(f"TEST-{i}", summary="s" * 220) for i in range(1, 201)]
+        mock_issues_protocol.issue_get_status_changelog = AsyncMock(
+            return_value=_changelog_with_one_return()
+        )
+
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            side_effect=[issues[:100], issues[100:], []]
+        )
+        page1 = get_tool_result_content(
+            await client_session.call_tool(
+                "issues_count_release_status_returns",
+                {
+                    "queue": "TEST",
+                    "version_id": 1,
+                    "include_evidence": False,
+                    "per_page": 25,
+                },
+            )
+        )
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            side_effect=[issues[:100], issues[100:], []]
+        )
+        page8 = get_tool_result_content(
+            await client_session.call_tool(
+                "issues_count_release_status_returns",
+                {
+                    "queue": "TEST",
+                    "version_id": 1,
+                    "include_evidence": False,
+                    "page": 8,
+                    "per_page": 25,
+                },
+            )
+        )
+
+        assert len(page1["table"]) == 25
+        assert len(page8["table"]) == 25  # 200 = 8 pages of 25
+        assert page1["coverage"]["total_rows"] == 200
+        assert page1["coverage"]["pages_total"] == 8
+        assert page1["total_returns"] == 200  # counters cover the whole release
+        assert page8["total_returns"] == 200
+        assert page1["coverage"].get("rows_capped") is None  # page fits, no cap
+
+    async def test_comments_pagination(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        comments = [{"id": i, "text": "c" * 200} for i in range(300)]
+        mock_issues_protocol.issue_get_comments = AsyncMock(return_value=comments)
+
+        page1 = get_tool_result_content(
+            await client_session.call_tool(
+                "issue_get_comments",
+                {"issue_id": "TEST-123", "page": 1, "per_page": 150},
+            )
+        )
+        page2 = get_tool_result_content(
+            await client_session.call_tool(
+                "issue_get_comments",
+                {"issue_id": "TEST-123", "page": 2, "per_page": 150},
+            )
+        )
+
+        assert len(page1["comments"]) == 150
+        assert len(page2["comments"]) == 150
+        assert page1["total_comments"] == 300
+        assert page1["coverage"]["pages_total"] == 2

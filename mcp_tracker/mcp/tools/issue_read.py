@@ -180,6 +180,27 @@ def _cap_worklogs_for_budget(
     return result, truncated
 
 
+def _pagination_coverage(
+    rows: list[Any],
+    page: int,
+    per_page: int | None,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Slice ``rows`` for the requested page. With per_page=None the full set
+    is returned (subject to the response-size cap). Coverage gains page,
+    per_page, total_rows, pages_total so callers can walk large sets in
+    separate bounded calls."""
+    total = len(rows)
+    if per_page is None:
+        return rows, {"page": 1, "per_page": None, "total_rows": total}
+    start = (page - 1) * per_page
+    return rows[start : start + per_page], {
+        "page": page,
+        "per_page": per_page,
+        "total_rows": total,
+        "pages_total": max(1, (total + per_page - 1) // per_page),
+    }
+
+
 def _normalize_description_label(value: str) -> str:
     """Normalize a human-written form label without weakening exact matching."""
     value = _LEADING_LIST_MARKER.sub("", value)
@@ -682,6 +703,8 @@ async def _open_issues_by_person_core(
     person: str | None = None,
     role: str,
     updated_before: str | None = None,
+    page: int = 1,
+    per_page: int | None = None,
 ) -> dict[str, Any]:
     """Shared implementation of issues_assigned_open / issues_created_open.
 
@@ -974,6 +997,8 @@ async def _open_issues_by_person_core(
         coverage["updated_before"] = updated_before
         coverage["open_after_filter"] = len(open_issues)
         coverage["filtered_out"] = counts["open"] - len(open_issues)
+    matches, pagination_info = _pagination_coverage(matches, page, per_page)
+    coverage.update(pagination_info)
     return envelope(
         "ok" if matches else "no_open_issues",
         matches,
@@ -991,6 +1016,8 @@ async def issues_assigned_open_core(
     users_api: Any | None = None,
     assignee: str | None = None,
     updated_before: str | None = None,
+    page: int = 1,
+    per_page: int | None = None,
 ) -> dict[str, Any]:
     """Open issues assigned to a user (see _open_issues_by_person_core)."""
     return await _open_issues_by_person_core(
@@ -1000,6 +1027,8 @@ async def issues_assigned_open_core(
         person=assignee,
         role="assignee",
         updated_before=updated_before,
+        page=page,
+        per_page=per_page,
     )
 
 
@@ -1010,6 +1039,8 @@ async def issues_created_open_core(
     users_api: Any | None = None,
     creator: str | None = None,
     updated_before: str | None = None,
+    page: int = 1,
+    per_page: int | None = None,
 ) -> dict[str, Any]:
     """Open issues created by a user (see _open_issues_by_person_core)."""
     return await _open_issues_by_person_core(
@@ -1019,6 +1050,8 @@ async def issues_created_open_core(
         person=creator,
         role="creator",
         updated_before=updated_before,
+        page=page,
+        per_page=per_page,
     )
 
 
@@ -1061,6 +1094,24 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     async def issue_get_comments(
         ctx: Context[Any, AppContext],
         issue_id: IssueID,
+        page: Annotated[
+            int,
+            Field(ge=1, description="Page number for paginated fetches"),
+        ] = 1,
+        per_page: Annotated[
+            int | None,
+            Field(
+                ge=1,
+                le=500,
+                description=(
+                    "Comments per page. Pass it together with page to walk "
+                    "long comment threads in separate calls: "
+                    "coverage.total_rows and coverage.pages_total tell you "
+                    "when to stop. Without it a single call returns as many "
+                    "comments as fit the response budget."
+                ),
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         check_issue_access(settings, issue_id)
 
@@ -1068,12 +1119,14 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             issue_id,
             auth=get_yandex_auth(ctx),
         )
+        total_comments = len(comments)
+        comments, pagination_info = _pagination_coverage(comments, page, per_page)
         response = {
             "status": "complete",
             "issue_id": issue_id,
-            "total_comments": len(comments),
-            "comments": comments or [],
-            "coverage": {"complete": True},
+            "total_comments": total_comments,
+            "comments": comments,
+            "coverage": {"complete": True, **pagination_info},
         }
         return _cap_rows_for_budget(response, "comments")
 
@@ -1227,6 +1280,24 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 ),
             ),
         ] = None,
+        page: Annotated[
+            int,
+            Field(ge=1, description="Page number for paginated fetches"),
+        ] = 1,
+        per_page: Annotated[
+            int | None,
+            Field(
+                ge=1,
+                le=200,
+                description=(
+                    "Rows per page. Pass it together with page to walk large "
+                    "result sets in separate calls: coverage.total_rows and "
+                    "coverage.pages_total tell you when to stop. Without it a "
+                    "single call returns as many rows as fit the response "
+                    "budget (coverage.rows_capped=true when trimmed)."
+                ),
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         lifespan = ctx.request_context.lifespan_context
         return await issues_assigned_open_core(
@@ -1235,6 +1306,8 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             users_api=lifespan.users,
             assignee=assignee,
             updated_before=updated_before,
+            page=page,
+            per_page=per_page,
         )
 
     @mcp.tool(
@@ -1282,6 +1355,24 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 ),
             ),
         ] = None,
+        page: Annotated[
+            int,
+            Field(ge=1, description="Page number for paginated fetches"),
+        ] = 1,
+        per_page: Annotated[
+            int | None,
+            Field(
+                ge=1,
+                le=200,
+                description=(
+                    "Rows per page. Pass it together with page to walk large "
+                    "result sets in separate calls: coverage.total_rows and "
+                    "coverage.pages_total tell you when to stop. Without it a "
+                    "single call returns as many rows as fit the response "
+                    "budget (coverage.rows_capped=true when trimmed)."
+                ),
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         lifespan = ctx.request_context.lifespan_context
         return await issues_created_open_core(
@@ -1290,6 +1381,8 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             users_api=lifespan.users,
             creator=creator,
             updated_before=updated_before,
+            page=page,
+            per_page=per_page,
         )
 
     @mcp.tool(
@@ -1455,6 +1548,24 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 description="Return issue rows. Set false when only counts/coverage are requested."
             ),
         ] = True,
+        page: Annotated[
+            int,
+            Field(ge=1, description="Page number for paginated fetches"),
+        ] = 1,
+        per_page: Annotated[
+            int | None,
+            Field(
+                ge=1,
+                le=500,
+                description=(
+                    "Rows per page. Pass it together with page to walk large "
+                    "worksets in separate calls: coverage.total_rows and "
+                    "coverage.pages_total tell you when to stop. Without it a "
+                    "single call returns as many rows as fit the response "
+                    "budget (coverage.rows_capped=true when trimmed)."
+                ),
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         if stale_updated_before and stale_for_days:
             raise ValueError("Use stale_updated_before or stale_for_days, not both")
@@ -1493,7 +1604,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             pages = 0
             used_statuses: list[dict[str, str]] = []
             for status_key, display, semantic_class in semantic_statuses:
-                page = 1
+                fetch_page = 1
                 status_matched = False
                 while True:
                     batch = await app.issues.issues_find_filter(
@@ -1507,7 +1618,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                             "updatedAt",
                         ],
                         per_page=100,
-                        page=page,
+                        page=fetch_page,
                         auth=auth,
                     )
                     pages += 1
@@ -1542,7 +1653,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                         }
                     if len(batch) < 100:
                         break
-                    page += 1
+                    fetch_page += 1
                 if status_matched:
                     used_statuses.append(
                         {
@@ -1687,6 +1798,10 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             compact_rows.append(compact)
         counts = Counter((row["queue"], row["semantic_class"]) for row in all_rows)
         returned_counts = Counter(row["queue"] for row in rows)
+        compact_rows, pagination_info = _pagination_coverage(
+            compact_rows, page, per_page
+        )
+        coverage.update(pagination_info)
         return {
             "status": "complete",
             "complete": True,
@@ -2234,6 +2349,26 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 ),
             ),
         ] = False,
+        page: Annotated[
+            int,
+            Field(ge=1, description="Page number for paginated fetches"),
+        ] = 1,
+        per_page: Annotated[
+            int | None,
+            Field(
+                ge=1,
+                le=500,
+                description=(
+                    "Rows per page. Pass it together with page to walk large "
+                    "releases in separate calls: coverage.total_rows and "
+                    "coverage.pages_total tell you when to stop. Without it a "
+                    "single call returns as many rows as fit the response "
+                    "budget (coverage.rows_capped=true when trimmed). Counters "
+                    "(issues_in_release, total_returns) always cover the whole "
+                    "release."
+                ),
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
             raise ValueError("queue must be a Yandex Tracker queue key")
@@ -2261,27 +2396,29 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         filters: dict[str, object] = {"queue": queue, "fixVersions": version_id}
         issues: list[Issue] = []
         seen: set[str] = set()
-        page = 1
+        fetch_page = 1
         while True:
             batch = await issues_api.issues_find_filter(
                 filters,
                 fields=["key", "summary"],
                 per_page=100,
-                page=page,
+                page=fetch_page,
                 auth=auth,
             )
             if not batch:
                 break
             for issue in batch:
                 if not issue.key or issue.key in seen:
-                    raise RuntimeError(f"Unstable issue pagination at page {page}")
+                    raise RuntimeError(
+                        f"Unstable issue pagination at page {fetch_page}"
+                    )
                 seen.add(issue.key)
                 issues.append(issue)
                 if len(issues) > max_issues:
                     raise ValueError(f"Release exceeds max_issues={max_issues}")
             if len(batch) < 100:
                 break
-            page += 1
+            fetch_page += 1
 
         def _display(value: object) -> str | None:
             if not isinstance(value, dict):
@@ -2426,6 +2563,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 row.pop("evidence", None)
         if returned_only:
             table = [row for row in table if row["return_count"] > 0]
+        table, pagination_info = _pagination_coverage(table, page, per_page)
         return _cap_rows_for_budget(
             {
                 "status": "complete",
@@ -2456,6 +2594,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                     "processed_issues": len(issues),
                     "complete": True,
                     "returned_only": returned_only,
+                    **pagination_info,
                     "all_issue_keys_sha256": hashlib.sha256(
                         "\n".join(sorted(seen)).encode("utf-8")
                     ).hexdigest(),
