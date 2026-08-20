@@ -1741,7 +1741,12 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "issue_get_worklogs, issues_find, YQL, terminal, or direct API calls. "
             "Russian 'оценка' means measure='estimation'; 'фактические трудозатраты', "
             "'затраченное время', or worklogs means measure='spent'. Never substitute "
-            "spent for estimation. Returns a compact evidence table and full coverage."
+            "spent for estimation. Returns a compact evidence table and full coverage. "
+            "For 'оценка И затраченное время по задачам релиза' call TWICE: "
+            "measure='estimation' and measure='spent', then take rows by the keys "
+            "already known from issues_count_release_status_returns. NEVER loop "
+            "issue_get/issue_get_worklogs per task for these numbers — 10+ calls of "
+            "~10KB each bloats the context and hits the server memory limit."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -1872,7 +1877,11 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "Use metric='testing_rework' for "
             "testing-to-rework transitions. Use metric='repeated_work_status' when "
             "the user defines a return as visiting the same working status twice. "
-            "Status rules are server-owned presets; do not invent status names."
+            "Status rules are server-owned presets; do not invent status names. "
+            "For counting queries ('посчитай возвраты', 'таблица задач с возвратами') "
+            "ALWAYS pass include_evidence=false AND returned_only=true — the response "
+            "shrinks ~80% (only returned tasks, no proof lists); counters and coverage "
+            "stay complete. The full evidence is only needed for audits."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
