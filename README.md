@@ -22,20 +22,89 @@ moved to 0.8.0 (entities API; `issues_summarize_effort` removed) — this fork
 intentionally stays on 0.7.1 because the runtime integration depends on
 `issues_summarize_effort`. Upstream sync stays possible via the `upstream` remote.
 
-Local delta vs v0.7.1:
+### Changes vs upstream v0.7.1 (38 → 53 tools)
+
+**New tools (10, in `issue_read.py` / `user.py`):**
+
+- `issues_count_release_status_returns` — returns per release version with
+  three metrics (`qa_rework_cycle` default, `testing_rework`, `repeated_work_status`)
+- `issues_summarize_effort` — estimation/spent totals for an epic or release
+  (per-task table, `issue_keys` filter, totals intact)
+- `issues_summarize_numeric_field_by_version` — sum any numeric field per release
+- `issues_list_qa_workset` — semantic "in testing" workset across queues
+  (stale/sprint filters, board resolution)
+- `issues_count_queue_status` / `issues_count_current_sprint_status` — status
+  distributions
+- `issues_search_text` — safe full-text search (no free-form YQL)
+- `issues_analyze_description_field` — frequency analysis of `label: value`
+  fields in descriptions
+- `issues_assigned_open` / `issues_created_open` — open issues by person with
+  deterministic name resolution
+
+**New tools (5, in `metrics.py` — QA-lead metrics, grouped by focus area):**
+
+- `issues_metrics_release_readiness` — release composition by status type,
+  open critical/blocker issues, estimation coverage, defect density
+- `issues_metrics_testing_cycle` — average time in testing, rework count and
+  average rework time (from status history), issues currently in rework
+- `issues_metrics_defect_trend` — created/closed/open bug totals, weekly
+  trend, aging buckets (<30 / 30–90 / >90 days), escapes to production
+  (tag/resolution marker)
+- `issues_metrics_data_discipline` — share of issues without estimation /
+  spent time / description, stale non-final issues
+- `issues_metrics_sprint_carryover` — carried-over issues between the two
+  most recent sprints (board resolution, ambiguous → candidates)
+
+**Modified tools / contracts:**
 
 - `issues_count_release_status_returns` — compact mode:
   `include_evidence=false` drops per-issue transition proof lists,
   `returned_only=true` keeps only rows with `return_count > 0`; counters and
   coverage stay complete. ~80% smaller responses for counting queries.
+- `issues_summarize_effort` — `issue_keys` filter: table rows only for the
+  given keys (totals still cover the whole release).
+- `issue_get_comments` — returns `{status, issue_id, total_comments, comments,
+  coverage}` instead of a bare list.
+- `issue_get_worklogs` — size-capped; reports trimmed totals in
+  `_truncated_entries`.
+- `issues_find` — `per_page` clamped to 20; cache wrapper passes `fields`.
 - Deterministic assignee resolution cascade (`resolve_assignee_core` in
   `mcp/tools/user.py`): exact login → email → unique last/first name → full
   name → fuzzy; ambiguous matches are reported as candidates, never guessed.
+- Duration convention: `_duration_hours` converts Tracker ISO-8601 durations
+  as **8h/day, 5d/week** (P2D → 16h) — used by effort tools and documented in
+  the skill.
+
+**Response-size safety (the fork's core guarantee):**
+
+- Hermes truncates tool results above a context-scaled threshold (39,321 chars
+  on a 64K-token model) and the sandbox-persistence fallback is unavailable in
+  the runtime profile, so oversized results degrade to a broken 1.5K preview.
+- Every list-returning tool self-caps its serialized response to 28,000 chars
+  (`_cap_rows_for_budget` / `_cap_worklogs_for_budget` in `issue_read.py`):
+  rows are pre-sorted by relevance and tail-trimmed; counters stay complete;
+  `coverage.rows_capped` / `rows_total_*` / `rows_returned_*` report the cap.
+  Capped pages expose the **effective** `per_page` and a corrected
+  `pages_total`, so the remainder stays reachable via `page=2..N`.
+- Pagination (`page` / `per_page`) on the list tools:
+  `issues_assigned_open` / `issues_created_open` return one page of 25 by
+  default (schema tells the model to continue until `total_rows` is collected);
+  `issues_count_release_status_returns`, `issue_get_comments`,
+  `issues_list_qa_workset` paginate on demand.
+- `updated_before` filter on `issues_assigned_open` / `issues_created_open`:
+  stale-issue queries filter server-side BEFORE the size cap, so rows are
+  never lost to capping (`coverage.open_after_filter` / `filtered_out`).
 - Tracker client: `fields` selector support, `boards_get_all`,
   `board_get_sprints`, `issues_find_filter`, `issue_get_status_changelog`
   (cached) plus matching protocol stubs.
 - Pagination guidance rewritten: prefer aggregate tools over manual page
-  loops and free-form YQL.
+  loops and free-form YQL; schemas prescribe positive flows (page 1 → N,
+  never re-fetch data already in context) to keep agent contexts small.
+
+**Tests:** 588 passing (`uv run pytest`), including boundary tests for the
+response budget (exactly-at-budget, just-over, giant rows, multi-list caps),
+pagination walks, effective-per-page after capping, and per-metric fixtures
+for all five metrics tools.
 
 ## Features
 

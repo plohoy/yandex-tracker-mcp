@@ -16,6 +16,7 @@ from mcp.server import FastMCP
 from mcp_tracker.mcp.tools.field import register_field_tools
 from mcp_tracker.mcp.tools.issue_read import register_issue_read_tools
 from mcp_tracker.mcp.tools.issue_write import register_issue_write_tools
+from mcp_tracker.mcp.tools.metrics import register_metrics_tools
 from mcp_tracker.mcp.tools.queue import register_queue_tools
 from mcp_tracker.mcp.tools.queue_write import register_queue_write_tools
 from mcp_tracker.mcp.tools.user import register_user_tools
@@ -34,6 +35,7 @@ def register_all_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     register_queue_tools(settings, mcp)
     register_field_tools(settings, mcp)
     register_issue_read_tools(settings, mcp)
+    register_metrics_tools(settings, mcp)
     register_user_tools(settings, mcp)
 
     # Only register write tools if not in read-only mode

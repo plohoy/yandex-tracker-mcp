@@ -37,6 +37,12 @@ READ_ONLY_TOOL_NAMES = [
     "issues_search_text",
     "issues_summarize_effort",
     "issues_summarize_numeric_field_by_version",
+    # Metrics tools (5)
+    "issues_metrics_release_readiness",
+    "issues_metrics_testing_cycle",
+    "issues_metrics_defect_trend",
+    "issues_metrics_data_discipline",
+    "issues_metrics_sprint_carryover",
     # User tools (4)
     "users_get_all",
     "users_search",
