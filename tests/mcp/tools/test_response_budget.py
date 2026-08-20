@@ -375,12 +375,15 @@ class TestToolResponsesFitBudget:
         )  # remainder reachable
         assert page1["coverage"]["total_rows"] == 45
 
-        mock_issues_protocol.issues_find_filter = AsyncMock(return_value=issues)
-        page2 = get_tool_result_content(
-            await client_session.call_tool(
-                "issues_assigned_open",
-                {"assignee": "tester", "page": 2, "per_page": effective},
+        collected = list(page1["matches"])
+        for pg in range(2, page1["coverage"]["pages_total"] + 1):
+            mock_issues_protocol.issues_find_filter = AsyncMock(return_value=issues)
+            page_n = get_tool_result_content(
+                await client_session.call_tool(
+                    "issues_assigned_open",
+                    {"assignee": "tester", "page": pg, "per_page": effective},
+                )
             )
-        )
-        keys = {m["key"] for m in page1["matches"] + page2["matches"]}
+            collected.extend(page_n["matches"])
+        keys = {m["key"] for m in collected}
         assert len(keys) == 45  # complete, no overlap, no loss
