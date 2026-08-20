@@ -208,7 +208,7 @@ class TestToolResponsesFitBudget:
         assert content["total_comments"] == 300
         assert content["coverage"]["rows_capped"] is True
 
-    async def test_assigned_open_caps_matches(
+    async def test_assigned_open_defaults_to_page_of_25(
         self,
         client_session: ClientSession,
         mock_issues_protocol: AsyncMock,
@@ -230,7 +230,10 @@ class TestToolResponsesFitBudget:
 
         content = get_tool_result_content(result)
         assert len(json.dumps(content, ensure_ascii=False)) <= BUDGET
-        assert content["coverage"]["rows_capped"] is True
+        assert len(content["matches"]) == 25  # default page size
+        assert content["coverage"]["per_page"] == 25
+        assert content["coverage"]["total_rows"] == 299
+        assert content["coverage"]["pages_total"] == 12
         assert content["counts"]["open"] >= 299
 
     async def test_assigned_open_pagination_walks_full_set(
@@ -324,12 +327,14 @@ class TestToolResponsesFitBudget:
 
         page1 = get_tool_result_content(
             await client_session.call_tool(
-                "issue_get_comments", {"issue_id": "TEST-123", "page": 1, "per_page": 100}
+                "issue_get_comments",
+                {"issue_id": "TEST-123", "page": 1, "per_page": 100},
             )
         )
         page3 = get_tool_result_content(
             await client_session.call_tool(
-                "issue_get_comments", {"issue_id": "TEST-123", "page": 3, "per_page": 100}
+                "issue_get_comments",
+                {"issue_id": "TEST-123", "page": 3, "per_page": 100},
             )
         )
 

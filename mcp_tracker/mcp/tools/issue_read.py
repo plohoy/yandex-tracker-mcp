@@ -707,7 +707,7 @@ async def _open_issues_by_person_core(
     role: str,
     updated_before: str | None = None,
     page: int = 1,
-    per_page: int | None = None,
+    per_page: int = 25,
 ) -> dict[str, Any]:
     """Shared implementation of issues_assigned_open / issues_created_open.
 
@@ -1020,7 +1020,7 @@ async def issues_assigned_open_core(
     assignee: str | None = None,
     updated_before: str | None = None,
     page: int = 1,
-    per_page: int | None = None,
+    per_page: int = 25,
 ) -> dict[str, Any]:
     """Open issues assigned to a user (see _open_issues_by_person_core)."""
     return await _open_issues_by_person_core(
@@ -1043,7 +1043,7 @@ async def issues_created_open_core(
     creator: str | None = None,
     updated_before: str | None = None,
     page: int = 1,
-    per_page: int | None = None,
+    per_page: int = 25,
 ) -> dict[str, Any]:
     """Open issues created by a user (see _open_issues_by_person_core)."""
     return await _open_issues_by_person_core(
@@ -1253,11 +1253,11 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "open_definition so the meaning is verbatim. Read-only; it never "
             "accepts or builds visible queries and never writes. Report "
             "counts.assigned_total and counts.open verbatim together with "
-            "the returned matches. The response contains ALL matching rows: "
-            "if coverage.rows_capped is ABSENT, 'matches' is complete — do "
-            "NOT re-call this tool with page/per_page, render the answer "
-            "from the data you already have. Re-fetching the same data "
-            "bloats the context and can exceed the model's memory limit."
+            "the returned matches. Every call returns ONE PAGE of 25 rows: "
+            "start with page=1, then page=2..N until you have collected "
+            "coverage.total_rows rows. Never call the same page twice — "
+            "re-fetching data you already have bloats the context and can "
+            "exceed the model's memory limit."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -1292,18 +1292,19 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             Field(ge=1, description="Page number for paginated fetches"),
         ] = 1,
         per_page: Annotated[
-            int | None,
+            int,
             Field(
                 ge=1,
                 le=200,
                 description=(
-                    "Rows per page. Use ONLY when a previous call reported "
-                    "coverage.rows_capped=true (or total_rows exceeds the "
-                    "returned matches). Never use it to re-fetch data you "
-                    "already have — the unfiltered response is complete."
+                    "Rows per page (default 25). Every call returns one page: "
+                    "start with page=1 and continue page=2..N until you have "
+                    "collected coverage.total_rows rows (coverage.pages_total "
+                    "tells you how many pages exist). Never call the same "
+                    "page twice and never re-fetch data you already have."
                 ),
             ),
-        ] = None,
+        ] = 25,
     ) -> dict[str, Any]:
         lifespan = ctx.request_context.lifespan_context
         return await issues_assigned_open_core(
@@ -1331,11 +1332,11 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "open_definition so the meaning is verbatim. Read-only; it never "
             "accepts or builds visible queries and never writes. Report "
             "counts.created_total and counts.open verbatim together with "
-            "the returned matches. The response contains ALL matching rows: "
-            "if coverage.rows_capped is ABSENT, 'matches' is complete — do "
-            "NOT re-call this tool with page/per_page, render the answer "
-            "from the data you already have. Re-fetching the same data "
-            "bloats the context and can exceed the model's memory limit."
+            "the returned matches. Every call returns ONE PAGE of 25 rows: "
+            "start with page=1, then page=2..N until you have collected "
+            "coverage.total_rows rows. Never call the same page twice — "
+            "re-fetching data you already have bloats the context and can "
+            "exceed the model's memory limit."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -1370,18 +1371,19 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             Field(ge=1, description="Page number for paginated fetches"),
         ] = 1,
         per_page: Annotated[
-            int | None,
+            int,
             Field(
                 ge=1,
                 le=200,
                 description=(
-                    "Rows per page. Use ONLY when a previous call reported "
-                    "coverage.rows_capped=true (or total_rows exceeds the "
-                    "returned matches). Never use it to re-fetch data you "
-                    "already have — the unfiltered response is complete."
+                    "Rows per page (default 25). Every call returns one page: "
+                    "start with page=1 and continue page=2..N until you have "
+                    "collected coverage.total_rows rows (coverage.pages_total "
+                    "tells you how many pages exist). Never call the same "
+                    "page twice and never re-fetch data you already have."
                 ),
             ),
-        ] = None,
+        ] = 25,
     ) -> dict[str, Any]:
         lifespan = ctx.request_context.lifespan_context
         return await issues_created_open_core(
