@@ -1311,8 +1311,11 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                     "Rows per page (default 25). Every call returns one page: "
                     "start with page=1 and continue page=2..N until you have "
                     "collected coverage.total_rows rows (coverage.pages_total "
-                    "tells you how many pages exist). Never call the same "
-                    "page twice and never re-fetch data you already have."
+                    "tells you how many pages exist). When continuing, reuse "
+                    "the per_page value from the previous response's coverage "
+                    "(it may be smaller than requested if the page was "
+                    "size-capped). Never call the same page twice and never "
+                    "re-fetch data you already have."
                 ),
             ),
         ] = 25,
@@ -1390,8 +1393,11 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                     "Rows per page (default 25). Every call returns one page: "
                     "start with page=1 and continue page=2..N until you have "
                     "collected coverage.total_rows rows (coverage.pages_total "
-                    "tells you how many pages exist). Never call the same "
-                    "page twice and never re-fetch data you already have."
+                    "tells you how many pages exist). When continuing, reuse "
+                    "the per_page value from the previous response's coverage "
+                    "(it may be smaller than requested if the page was "
+                    "size-capped). Never call the same page twice and never "
+                    "re-fetch data you already have."
                 ),
             ),
         ] = 25,
