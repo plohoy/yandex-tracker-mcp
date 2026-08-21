@@ -351,7 +351,7 @@ class TestSampling:
 
         result = await client_session.call_tool(
             "issues_metrics_testing_cycle",
-            {"queue": "TEST", "max_issues": 100},
+            {"queues": ["TEST"], "max_issues": 100},
         )
 
         content = get_tool_result_content(result)
