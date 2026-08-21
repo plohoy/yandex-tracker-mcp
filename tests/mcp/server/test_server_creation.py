@@ -43,6 +43,7 @@ READ_ONLY_TOOL_NAMES = [
     "issues_metrics_defect_trend",
     "issues_metrics_data_discipline",
     "issues_metrics_sprint_carryover",
+    "issues_metrics_qa_dashboard",
     # User tools (4)
     "users_get_all",
     "users_search",

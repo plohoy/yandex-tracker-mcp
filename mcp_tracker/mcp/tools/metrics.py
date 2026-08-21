@@ -790,3 +790,339 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             },
         }
         return _cap_rows_for_budget(response, "carried_table")
+
+    @mcp.tool(
+        title="QA Department Dashboard",
+        description=(
+            "Weekly QA-department dashboard («дашборд отдела QA»): ONE call "
+            "returns the aggregate view for a queue — release readiness and "
+            "return rate (version), defect trend and escapes, testing-cycle "
+            "averages from status history (sampled), QA workset (in testing / "
+            "ready / stale) and data discipline. Use whenever the user asks "
+            "for «дашборд отдела QA», the QA department dashboard, or a "
+            "weekly QA summary. Aggregates only — no per-task tables; point "
+            "the user to the specific metric tools for detail. release and "
+            "cycle blocks are skipped when version_id is omitted."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    async def issues_metrics_qa_dashboard(
+        ctx: Context[Any, AppContext],
+        queue: Annotated[str, Field(min_length=1, description="Queue key")],
+        version_id: Annotated[
+            int | None,
+            Field(
+                gt=0,
+                description="Release version id for readiness/returns/cycle blocks",
+            ),
+        ] = None,
+        created_after: Annotated[
+            str | None,
+            Field(
+                description="ISO date, inclusive start of the defect window (default: 7 days ago)"
+            ),
+        ] = None,
+        escape_marker: Annotated[
+            str | None,
+            Field(
+                description="Substring matched against tags/resolution to detect escapes (e.g. «прод»)"
+            ),
+        ] = None,
+        sample: Annotated[
+            int,
+            Field(
+                ge=10,
+                le=500,
+                description="Max issues for changelog-based blocks (returns/cycle)",
+            ),
+        ] = 100,
+        max_issues: Annotated[int, Field(ge=100, le=10_000)] = 2_000,
+    ) -> dict[str, Any]:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
+            raise ValueError("queue must be a Yandex Tracker queue key")
+        issues_api = ctx.request_context.lifespan_context.issues
+        auth = get_yandex_auth(ctx)
+        now = _now()
+        today = now.date().isoformat()
+        since = created_after or (now - timedelta(days=7)).date().isoformat()
+        response: dict[str, Any] = {
+            "status": "complete",
+            "complete": True,
+            "queue": queue,
+            "version_id": version_id,
+            "as_of": today,
+        }
+
+        release: dict[str, Any] | None = None
+        if version_id is not None:
+            issues, release_complete = await _drain_filtered(
+                issues_api,
+                auth,
+                {"queue": queue, "fixVersions": version_id},
+                [
+                    "key",
+                    "summary",
+                    "status",
+                    "statusType",
+                    "priority",
+                    "type",
+                    "estimation",
+                ],
+                max_issues,
+                "qa_dashboard.release",
+            )
+            status_types: Counter[str] = Counter()
+            open_critical: list[dict[str, Any]] = []
+            with_estimation = 0
+            bugs = 0
+            for issue in issues:
+                st = _reference_key(getattr(issue, "statusType", None))
+                status_types[st or "unknown"] += 1
+                is_open = st not in _FINAL_STATUS_TYPE_KEYS
+                if issue.estimation:
+                    with_estimation += 1
+                if (_reference_key(getattr(issue, "type", None)) or "").casefold() in (
+                    "bug",
+                    "defect",
+                ):
+                    bugs += 1
+                if (
+                    is_open
+                    and (
+                        _reference_key(getattr(issue, "priority", None)) or ""
+                    ).casefold()
+                    in _CRITICAL_PRIORITIES
+                ):
+                    open_critical.append(
+                        {
+                            "key": issue.key,
+                            "summary": issue.summary,
+                            "priority": _reference_display(
+                                getattr(issue, "priority", None)
+                            ),
+                        }
+                    )
+            open_critical.sort(key=lambda row: str(row["key"] or ""))
+            total = len(issues)
+            release = {
+                "issues_total": total,
+                "status_type_counts": dict(status_types),
+                "open_critical": len(open_critical),
+                "open_critical_top": open_critical[:5],
+                "estimation_coverage": {
+                    "with_value": with_estimation,
+                    "without_value": total - with_estimation,
+                    "share_with_value": round(with_estimation / total, 3)
+                    if total
+                    else None,
+                },
+                "defect_density": {
+                    "bugs": bugs,
+                    "share": round(bugs / total, 3) if total else None,
+                },
+                "coverage": {"complete": release_complete, "version_id": version_id},
+            }
+
+        defects, defect_complete = await _drain_filtered(
+            issues_api,
+            auth,
+            {
+                "queue": queue,
+                "type": ["bug"],
+                "created": {"from": since, "to": today},
+            },
+            [
+                "key",
+                "status",
+                "statusType",
+                "priority",
+                "resolution",
+                "tags",
+                "createdAt",
+                "updatedAt",
+            ],
+            max_issues,
+            "qa_dashboard.defects",
+        )
+        closed = 0
+        open_now = 0
+        aging: Counter[str] = Counter()
+        escapes: list[str] = []
+        trend: Counter[str] = Counter()
+        for issue in defects:
+            st = _reference_key(getattr(issue, "statusType", None))
+            is_open = st not in _FINAL_STATUS_TYPE_KEYS
+            if is_open:
+                open_now += 1
+            else:
+                closed += 1
+            if isinstance(issue.created_at, datetime):
+                trend[_bucket_label(issue.created_at, "week")] += 1
+            if is_open and isinstance(issue.created_at, datetime):
+                aging[_age_bucket((now.date() - issue.created_at.date()).days)] += 1
+            if escape_marker:
+                marker = escape_marker.casefold()
+                resolution = (
+                    _reference_display(getattr(issue, "resolution", None)) or ""
+                )
+                if marker in (" ".join(issue.tags or []) + " " + resolution).casefold():
+                    escapes.append(issue.key)
+        defects_block = {
+            "created_total": len(defects),
+            "closed_total": closed,
+            "open_now": open_now,
+            "aging_buckets_days": dict(aging),
+            "trend_weekly": [
+                {"period": bucket, "created": trend[bucket]} for bucket in sorted(trend)
+            ],
+            "escapes": len(escapes),
+            "escapes_share": round(len(escapes) / len(defects), 3) if defects else None,
+            "escape_keys": escapes[:5],
+            "coverage": {
+                "complete": defect_complete,
+                "window": {"from": since, "to": today},
+            },
+        }
+        if escape_marker is None:
+            defects_block.pop("escapes")
+            defects_block.pop("escapes_share")
+            defects_block.pop("escape_keys")
+
+        discipline, discipline_complete = await _drain_filtered(
+            issues_api,
+            auth,
+            {"queue": queue},
+            [
+                "key",
+                "status",
+                "statusType",
+                "estimation",
+                "spent",
+                "description",
+                "updatedAt",
+            ],
+            max_issues,
+            "qa_dashboard.discipline",
+        )
+        no_estimation = 0
+        no_spent = 0
+        no_description = 0
+        in_testing = 0
+        stale_in_testing = 0
+        stale_non_final = 0
+        stale_cutoff = now - timedelta(days=30)
+        testing_stale_cutoff = now - timedelta(days=5)
+        for issue in discipline:
+            if not issue.estimation:
+                no_estimation += 1
+            if not issue.spent:
+                no_spent += 1
+            if not (issue.description or "").strip():
+                no_description += 1
+            st = _reference_key(getattr(issue, "statusType", None))
+            is_final = st in _FINAL_STATUS_TYPE_KEYS
+            status_display = (
+                (issue.status.display or "") if issue.status else ""
+            ).casefold()
+            if status_display in _TESTING_DISPLAYS:
+                in_testing += 1
+                updated = issue.updated_at
+                if updated is not None:
+                    try:
+                        if updated.tzinfo is None:
+                            updated = updated.replace(tzinfo=timezone.utc)
+                        if updated < testing_stale_cutoff:
+                            stale_in_testing += 1
+                    except (ValueError, TypeError):
+                        pass
+            if not is_final:
+                updated = issue.updated_at
+                if updated is not None:
+                    try:
+                        if updated.tzinfo is None:
+                            updated = updated.replace(tzinfo=timezone.utc)
+                        if updated < stale_cutoff:
+                            stale_non_final += 1
+                    except (ValueError, TypeError):
+                        pass
+        total = len(discipline)
+        discipline_block = {
+            "issues_total": total,
+            "without_estimation": {
+                "count": no_estimation,
+                "share": round(no_estimation / total, 3) if total else None,
+            },
+            "without_spent": {
+                "count": no_spent,
+                "share": round(no_spent / total, 3) if total else None,
+            },
+            "without_description": {
+                "count": no_description,
+                "share": round(no_description / total, 3) if total else None,
+            },
+            "stale_non_final_30d": stale_non_final,
+            "coverage": {"complete": discipline_complete},
+        }
+
+        cycle: dict[str, Any] | None = None
+        if version_id is not None:
+            release_issues, _ = await _drain_filtered(
+                issues_api,
+                auth,
+                {"queue": queue, "fixVersions": version_id},
+                ["key", "summary", "status", "updatedAt"],
+                sample,
+                "qa_dashboard.cycle",
+            )
+            test_cycles = 0
+            test_hours = 0.0
+            reworks = 0
+            rework_hours = 0.0
+            issues_with_returns = 0
+            for issue in release_issues:
+                events = _status_events(
+                    await issues_api.issue_get_status_changelog(issue.key, auth=auth)
+                )
+                if not events:
+                    continue
+                metrics = _cycle_metrics(events)
+                test_cycles += metrics["test_cycles"]
+                test_hours += metrics["test_hours_total"]
+                reworks += metrics["rework_count"]
+                rework_hours += metrics["rework_hours_total"]
+                if metrics["rework_count"]:
+                    issues_with_returns += 1
+            sampled = len(release_issues)
+            cycle = {
+                "issues_sampled": sampled,
+                "issues_with_returns": issues_with_returns,
+                "return_rate_share": round(issues_with_returns / sampled, 3)
+                if sampled
+                else None,
+                "rework_total": reworks,
+                "test_cycles_total": test_cycles,
+                "avg_test_cycle_hours": round(test_hours / test_cycles, 2)
+                if test_cycles
+                else None,
+                "avg_rework_hours": round(rework_hours / reworks, 2)
+                if reworks
+                else None,
+                "coverage": {"sampled": True, "sample_limit": sample},
+            }
+
+        response["release"] = release
+        response["defects"] = defects_block
+        response["workset"] = {
+            "in_testing": in_testing,
+            "stale_in_testing_5d": stale_in_testing,
+            "testing_statuses": sorted(_TESTING_DISPLAYS),
+        }
+        response["cycle"] = cycle
+        response["discipline"] = discipline_block
+        response["reporting_contract"] = {
+            "aggregates_only_no_tables": True,
+            "cycle_and_returns_are_sampled": True,
+            "hours_not_days": True,
+            "defect_closed_dates_approximated_by_updated_at": False,
+        }
+        return response

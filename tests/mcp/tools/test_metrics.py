@@ -299,3 +299,81 @@ class TestSampling:
         content = get_tool_result_content(result)
         assert content["issues_scanned"] == 100
         assert content["coverage"]["complete"] is False
+
+
+class TestQaDashboard:
+    async def test_dashboard_aggregates(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        release = [
+            _issue(
+                "TEST-1",
+                status_type="open",
+                priority="blocker",
+                type_key="bug",
+                estimation="P1D",
+            ),
+            _issue("TEST-2", status_type="done"),
+        ]
+        defects = [_issue("TEST-3", status_type="open", created_at=now, tags=["прод"])]
+        discipline = [
+            _issue("TEST-1", estimation=None, spent=None, description=""),
+            _issue("TEST-2", estimation="P1D", spent="P1D", status_type="done"),
+            _issue("TEST-4", status="Тестируется", status_type="open"),
+        ]
+        cycle_issues = release
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            side_effect=[release, defects, discipline, cycle_issues]
+        )
+        changelog = [
+            _status_event("2026-01-01T10:00:00+00:00", "В работе", "Тестируется"),
+            _status_event("2026-01-01T12:00:00+00:00", "Тестируется", "Провал"),
+            _status_event("2026-01-02T10:00:00+00:00", "Провал", "Тестируется"),
+        ]
+        mock_issues_protocol.issue_get_status_changelog = AsyncMock(
+            return_value=changelog
+        )
+
+        result = await client_session.call_tool(
+            "issues_metrics_qa_dashboard",
+            {
+                "queue": "TEST",
+                "version_id": 1,
+                "created_after": "2026-08-01",
+                "escape_marker": "прод",
+            },
+        )
+
+        content = get_tool_result_content(result)
+        assert content["status"] == "complete"
+        assert content["release"]["issues_total"] == 2
+        assert content["release"]["open_critical"] == 1
+        assert content["defects"]["created_total"] == 1
+        assert content["defects"]["escapes"] == 1
+        assert content["defects"]["escapes_share"] == 1.0
+        assert content["workset"]["in_testing"] == 1
+        assert content["discipline"]["without_estimation"]["count"] == 2
+        assert content["discipline"]["without_spent"]["count"] == 2
+        assert content["discipline"]["without_description"]["count"] == 1
+        assert content["cycle"]["issues_with_returns"] == 2
+        assert content["cycle"]["rework_total"] == 2
+        assert content["cycle"]["return_rate_share"] == 1.0
+
+    async def test_dashboard_without_version_skips_cycle(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        defects: list[Issue] = []
+        discipline: list[Issue] = []
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            side_effect=[defects, discipline]
+        )
+
+        result = await client_session.call_tool(
+            "issues_metrics_qa_dashboard", {"queue": "TEST"}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["release"] is None
+        assert content["cycle"] is None
+        assert content["defects"]["created_total"] == 0

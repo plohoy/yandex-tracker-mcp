@@ -22,7 +22,7 @@ moved to 0.8.0 (entities API; `issues_summarize_effort` removed) — this fork
 intentionally stays on 0.7.1 because the runtime integration depends on
 `issues_summarize_effort`. Upstream sync stays possible via the `upstream` remote.
 
-### Changes vs upstream v0.7.1 (38 → 53 tools)
+### Changes vs upstream v0.7.1 (38 → 54 tools)
 
 **New tools (10, in `issue_read.py` / `user.py`):**
 
@@ -41,7 +41,11 @@ intentionally stays on 0.7.1 because the runtime integration depends on
 - `issues_assigned_open` / `issues_created_open` — open issues by person with
   deterministic name resolution
 
-**New tools (5, in `metrics.py` — QA-lead metrics, grouped by focus area):**
+**New tools (6, in `metrics.py` — QA-lead metrics, grouped by focus area):**
+
+- `issues_metrics_qa_dashboard` — the «дашборд отдела QA»: ONE call returns
+  release readiness + return rate (sampled), defect trend + escapes, testing
+  cycle averages, QA workset and data discipline for a queue (aggregates only)
 
 - `issues_metrics_release_readiness` — release composition by status type,
   open critical/blocker issues, estimation coverage, defect density
@@ -101,7 +105,7 @@ intentionally stays on 0.7.1 because the runtime integration depends on
   loops and free-form YQL; schemas prescribe positive flows (page 1 → N,
   never re-fetch data already in context) to keep agent contexts small.
 
-**Tests:** 588 passing (`uv run pytest`), including boundary tests for the
+**Tests:** 594 passing (`uv run pytest`), including boundary tests for the
 response budget (exactly-at-budget, just-over, giant rows, multi-list caps),
 pagination walks, effective-per-page after capping, and per-metric fixtures
 for all five metrics tools.
