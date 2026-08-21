@@ -262,7 +262,6 @@ async def _carryover_metrics(
     }
 
 
-
 def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     @mcp.tool(
         title="Release Readiness Metrics",
@@ -1118,7 +1117,6 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 "carried_definition": "issue present in both previous and current sprint",
             },
         }
-
 
     @mcp.tool(
         title="QA Department Dashboard",
