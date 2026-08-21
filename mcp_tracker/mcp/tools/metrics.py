@@ -339,7 +339,19 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 for q in await app.queues.queues_list(auth=auth)
                 if getattr(q, "key", None)
             ]
+        per_queue: dict[str, dict[str, Any]] = {}
+        for q in scope:
+            per_queue[q] = {
+                "issues_scanned": 0,
+                "issues_with_testing_history": 0,
+                "test_cycles_total": 0,
+                "test_hours": 0.0,
+                "rework_total": 0,
+                "rework_hours": 0.0,
+                "in_rework_now": 0,
+            }
         issues: list[Any] = []
+        issue_queues: list[str] = []
         complete = True
         collected = 0
         for q in scope:
@@ -355,7 +367,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 "testing_cycle",
             )
             complete = complete and q_complete
+            per_queue[q]["issues_scanned"] = len(batch)
             issues.extend(batch)
+            issue_queues.extend(q for _ in batch)
             collected += len(batch)
             if collected >= max_issues:
                 break
@@ -369,14 +383,12 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
 
         async def fetch_changelog(issue: Any) -> list[Any]:
             async with semaphore:
-                return await issues_api.issue_get_status_changelog(
-                    issue.key, auth=auth
-                )
+                return await issues_api.issue_get_status_changelog(issue.key, auth=auth)
 
-        changelogs = await asyncio.gather(
-            *(fetch_changelog(issue) for issue in issues)
-        )
-        for issue, changelog in zip(issues, changelogs, strict=True):
+        changelogs = await asyncio.gather(*(fetch_changelog(issue) for issue in issues))
+        for issue, queue_name, changelog in zip(
+            issues, issue_queues, changelogs, strict=True
+        ):
             events = _status_events(changelog)
             if not events:
                 continue
@@ -386,14 +398,22 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             test_hours += metrics["test_hours_total"]
             reworks += metrics["rework_count"]
             rework_hours += metrics["rework_hours_total"]
+            pq = per_queue[queue_name]
+            pq["issues_with_testing_history"] += 1
+            pq["test_cycles_total"] += metrics["test_cycles"]
+            pq["test_hours"] += metrics["test_hours_total"]
+            pq["rework_total"] += metrics["rework_count"]
+            pq["rework_hours"] += metrics["rework_hours_total"]
             status_display = (
                 (issue.status.display or "") if issue.status else ""
             ).casefold()
             if metrics["currently_in_rework"] and status_display == "в работе":
+                pq["in_rework_now"] += 1
                 in_rework_now.append(
                     {
                         "key": issue.key,
                         "summary": issue.summary,
+                        "queue": queue_name,
                         "updated_at": (
                             issue.updated_at.isoformat()
                             if hasattr(issue.updated_at, "isoformat")
@@ -402,6 +422,20 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                         "url": f"https://tracker.yandex.ru/{issue.key}",
                     }
                 )
+        for q in scope:
+            pq = per_queue[q]
+            pq["avg_test_cycle_hours"] = (
+                round(pq["test_hours"] / pq["test_cycles_total"], 2)
+                if pq["test_cycles_total"]
+                else None
+            )
+            pq["avg_rework_hours"] = (
+                round(pq["rework_hours"] / pq["rework_total"], 2)
+                if pq["rework_total"]
+                else None
+            )
+            pq.pop("test_hours", None)
+            pq.pop("rework_hours", None)
         in_rework_now.sort(key=lambda row: str(row["updated_at"] or ""), reverse=True)
         response = {
             "status": "complete",
@@ -418,6 +452,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "avg_rework_hours": round(rework_hours / reworks, 2) if reworks else None,
             "in_rework_now": len(in_rework_now),
             "in_rework_table": in_rework_now,
+            "per_queue": per_queue,
             "testing_statuses": sorted(_TESTING_DISPLAYS),
             "coverage": {
                 "processed_issues": len(issues),

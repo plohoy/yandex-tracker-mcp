@@ -163,6 +163,11 @@ class TestTestingCycle:
         assert content["avg_rework_hours"] == 24.0  # 01-01T14:00 -> 01-02T14:00
         assert content["in_rework_now"] == 1
         assert content["in_rework_table"][0]["key"] == "TEST-2"
+        pq = content["per_queue"]["TEST"]
+        assert pq["issues_scanned"] == 2
+        assert pq["test_cycles_total"] == 3
+        assert pq["rework_total"] == 1
+        assert pq["in_rework_now"] == 1
 
 
 class TestDefectTrend:
