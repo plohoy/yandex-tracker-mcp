@@ -1223,7 +1223,10 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "never assume truncation unless coverage reports rows_capped=true. "
             "Copy the pre-built compact tables (keys 'workset_table' and "
             "'discipline_table') VERBATIM into the answer — never rebuild "
-            "or convert them (markdown pipes do not render on Telegram)."
+            "or convert them (markdown pipes do not render on Telegram). "
+            "Transient API errors (429/504) are retried INSIDE the tool — if "
+            "a call fails, retry the SAME call once; never assemble the "
+            "dashboard from other tools and never use terminal/scripts to wait."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
