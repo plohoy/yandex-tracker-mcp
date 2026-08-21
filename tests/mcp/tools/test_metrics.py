@@ -705,7 +705,7 @@ class TestSprintCarryoverAllQueues:
 
 
 class TestDisciplineTable:
-    def test_fenced_table_has_row_newlines(self) -> None:
+    def test_aligned_monospace_block(self) -> None:
         from mcp_tracker.mcp.tools.metrics import _discipline_table
 
         table = _discipline_table(
@@ -723,7 +723,10 @@ class TestDisciplineTable:
         )
         lines = table.splitlines()
         assert lines[0] == "```"
-        assert "76.2% (76)" in table
         assert lines[-1] == "```"
-        # every markdown row on its own line (the bug: one collapsed line)
-        assert sum(1 for l in lines if l.startswith("|")) == 3
+        # aligned monospace, no markdown pipes
+        assert "|" not in table
+        assert "76.2% (76)" in table
+        # every row on its own line (the bug: one collapsed line)
+        assert sum(1 for l in lines if l.strip().startswith("Q1")) == 1
+        assert sum(1 for l in lines if l.strip().startswith("Очередь")) == 1

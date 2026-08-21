@@ -58,8 +58,9 @@ def _default_release_queues() -> list[str] | None:
 def _discipline_table(
     per_queue: dict[str, dict[str, Any]], stale_label: str, stale_key: str
 ) -> str:
-    """Pre-built discipline table (fenced) so the model copies it verbatim instead of
-    rebuilding markdown (LLM re-generation collapses table newlines into one line)."""
+    """Pre-built discipline table as an aligned monospace block (no markdown pipes:
+    pipes do not render on Telegram and LLM re-generation collapses pipe tables
+    into one line). The model copies the block verbatim."""
 
     def cell(metric: dict[str, Any]) -> str:
         share = metric.get("share")
@@ -68,19 +69,33 @@ def _discipline_table(
             return "—"
         return f"{share * 100:.1f}% ({count})"
 
-    lines = [
-        f"| Очередь | Всего | Без оценки | Без затраченного времени | Без описания | {stale_label} |",
-        "|---|---|---|---|---|---|",
+    headers = [
+        "Очередь",
+        "Всего",
+        "Без оценки",
+        "Без затраченного времени",
+        "Без описания",
+        stale_label,
     ]
-    for queue, d in per_queue.items():
-        lines.append(
-            f"| {queue} | {d.get('issues_total', '?')} | "
-            f"{cell(d.get('without_estimation', {}))} | "
-            f"{cell(d.get('without_spent', {}))} | "
-            f"{cell(d.get('without_description', {}))} | "
-            f"{d.get(stale_key, '?')} |"
-        )
-    return "```\n" + "\n".join(lines) + "\n```"
+    rows = [
+        [
+            queue,
+            str(d.get("issues_total", "?")),
+            cell(d.get("without_estimation", {})),
+            cell(d.get("without_spent", {})),
+            cell(d.get("without_description", {})),
+            str(d.get(stale_key, "?")),
+        ]
+        for queue, d in per_queue.items()
+    ]
+    widths = [
+        max(len(headers[i]), *(len(r[i]) for r in rows)) for i in range(len(headers))
+    ]
+
+    def fmt(row: list[str]) -> str:
+        return "  ".join(v.ljust(widths[i]) for i, v in enumerate(row)).rstrip()
+
+    return "```\n" + "\n".join([fmt(headers), *map(fmt, rows)]) + "\n```"
 
 
 def _hours_between(start: Any, end: Any) -> float:
@@ -810,9 +825,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "'без описания', 'зависшие задачи'. The stale table is capped "
             "(rows_capped in coverage). The per_queue breakdown covers ALL "
             "queues and always fits inline — never assume it was truncated; "
-            "report every queue row. Copy the pre-built fenced table (key "
-            "'table') VERBATIM into the answer — never rebuild markdown "
-            "tables yourself (rebuilding collapses the rows into one line)."
+            "report every queue row. Copy the pre-built aligned monospace "
+            "table (key 'table') VERBATIM into the answer — never rebuild "
+            "or convert it (markdown pipes do not render on Telegram)."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -1174,9 +1189,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "only — no per-task tables; point the user to the specific "
             "metric tools for detail. The response fits the inline budget — "
             "never assume truncation unless coverage reports rows_capped=true. "
-            "Copy the pre-built fenced discipline table (key "
+            "Copy the pre-built aligned monospace discipline table (key "
             "'discipline_table') VERBATIM into the answer — never rebuild "
-            "markdown tables yourself (rebuilding collapses rows into one line)."
+            "or convert it (markdown pipes do not render on Telegram)."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
