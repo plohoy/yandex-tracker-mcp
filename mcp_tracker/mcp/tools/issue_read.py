@@ -220,7 +220,7 @@ def _normalize_description_label(value: str) -> str:
     value = _LEADING_LIST_MARKER.sub("", value)
     value = value.strip().strip("*_` ")
     value = " ".join(value.casefold().split())
-    # The YOURQUEUE form used both labels over time; they represent the same
+    # Some queue forms used both labels over time; they represent the same
     # field, while free-form lines containing the word "модель" do not.
     if value == "производитель и модель устройства":
         return "модель устройства"

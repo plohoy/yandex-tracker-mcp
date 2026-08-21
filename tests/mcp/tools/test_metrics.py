@@ -536,7 +536,7 @@ class TestQaDashboard:
         discipline: list[Issue] = []
         ws_q1 = [_issue("TEST-1", status="Тестируется")]
         ws_q2: list[Issue] = []
-        # defects(YOURQUEUE), discipline(YOURQUEUE), discipline(TESTQUEUE),
+        # defects(Q1), discipline(Q1), discipline(Q2),
         # workset(Q1), workset(Q2)
         mock_issues_protocol.issues_find_filter = AsyncMock(
             side_effect=[defects, discipline, discipline, ws_q1, ws_q2]
@@ -549,7 +549,9 @@ class TestQaDashboard:
         assert content["workset"]["total_in_testing"] == 1
         assert content["workset"]["per_queue"]["Q1"]["in_testing"] == 1
         assert content["workset"]["per_queue"]["Q2"]["in_testing"] == 0
-        assert set(content["discipline"]) == {"YOURQUEUE", "TESTQUEUE"}
+        # release/discipline scope falls back to the discovered queues when the
+        # release-queues env is unset (no org-specific names in the repo)
+        assert set(content["discipline"]) == {"Q1", "Q2"}
 
 
 class TestQaWorkset:

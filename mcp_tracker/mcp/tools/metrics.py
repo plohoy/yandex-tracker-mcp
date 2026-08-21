@@ -18,6 +18,7 @@ reporting_contract, list fields self-capped to the response budget
 """
 
 import asyncio
+import os
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,13 @@ _CRITICAL_PRIORITIES = {"critical", "blocker"}
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _default_release_queues() -> list[str] | None:
+    """Release queues for the QA dashboard from env (org-specific, kept out of the repo)."""
+    raw = os.environ.get("TRACKER_DASHBOARD_RELEASE_QUEUES", "")
+    queues = [q.strip() for q in raw.split(",") if q.strip()]
+    return queues or None
 
 
 def _hours_between(start: Any, end: Any) -> float:
@@ -1144,8 +1152,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 max_length=10,
                 description=(
                     "Queue keys for the workset scope; default: ALL queues. "
-                    "Release/discipline always use YOURQUEUE+TESTQUEUE "
-                    "unless queues is given (then its first queue anchors the "
+                    "Release/discipline default to the configured release "
+                    "queues (env TRACKER_DASHBOARD_RELEASE_QUEUES) or to ALL "
+                    "queues when unset; pass queues explicitly to scope them. "
                     "release)."
                 ),
             ),
@@ -1179,14 +1188,22 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ] = 100,
         max_issues: Annotated[int, Field(ge=100, le=10_000)] = 2_000,
     ) -> dict[str, Any]:
-        release_scope = queues or ["YOURQUEUE", "TESTQUEUE"]
-        for queue in release_scope:
-            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
-                raise ValueError("queue must be a Yandex Tracker queue key")
         app = ctx.request_context.lifespan_context
         issues_api = app.issues
         queues_api = app.queues
         auth = get_yandex_auth(ctx)
+        release_scope = (
+            queues
+            or _default_release_queues()
+            or [
+                q.key
+                for q in await queues_api.queues_list(auth=auth)
+                if getattr(q, "key", None)
+            ]
+        )
+        for queue in release_scope:
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
+                raise ValueError("queue must be a Yandex Tracker queue key")
         now = _now()
         today = now.date().isoformat()
         since = created_after or (now - timedelta(days=7)).date().isoformat()
