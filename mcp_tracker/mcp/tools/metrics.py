@@ -682,7 +682,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "description, and non-final issues stale for more than stale_days "
             "(not updated). Use for 'кто не логирует время', 'без оценки', "
             "'без описания', 'зависшие задачи'. The stale table is capped "
-            "(rows_capped in coverage)."
+            "(rows_capped in coverage). The per_queue breakdown covers ALL "
+            "queues and always fits inline — never assume it was truncated; "
+            "report every queue row."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
