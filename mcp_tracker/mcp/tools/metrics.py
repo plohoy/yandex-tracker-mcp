@@ -55,6 +55,34 @@ def _default_release_queues() -> list[str] | None:
     return queues or None
 
 
+def _discipline_table(
+    per_queue: dict[str, dict[str, Any]], stale_label: str, stale_key: str
+) -> str:
+    """Pre-built discipline table (fenced) so the model copies it verbatim instead of
+    rebuilding markdown (LLM re-generation collapses table newlines into one line)."""
+
+    def cell(metric: dict[str, Any]) -> str:
+        share = metric.get("share")
+        count = metric.get("count")
+        if share is None:
+            return "—"
+        return f"{share * 100:.1f}% ({count})"
+
+    lines = [
+        f"| Очередь | Всего | Без оценки | Без затраченного времени | Без описания | {stale_label} |",
+        "|---|---|---|---|---|---|",
+    ]
+    for queue, d in per_queue.items():
+        lines.append(
+            f"| {queue} | {d.get('issues_total', '?')} | "
+            f"{cell(d.get('without_estimation', {}))} | "
+            f"{cell(d.get('without_spent', {}))} | "
+            f"{cell(d.get('without_description', {}))} | "
+            f"{d.get(stale_key, '?')} |"
+        )
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
 def _hours_between(start: Any, end: Any) -> float:
     """Hours between two ISO timestamps; 0.0 when unparseable."""
     try:
@@ -782,7 +810,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "'без описания', 'зависшие задачи'. The stale table is capped "
             "(rows_capped in coverage). The per_queue breakdown covers ALL "
             "queues and always fits inline — never assume it was truncated; "
-            "report every queue row."
+            "report every queue row. Copy the pre-built fenced table (key "
+            "'table') VERBATIM into the answer — never rebuild markdown "
+            "tables yourself (rebuilding collapses the rows into one line)."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -932,6 +962,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             },
             "per_queue": per_queue,
             "stale_table": stale,
+            "table": _discipline_table(
+                per_queue, f"Залежались >{stale_days}д (не финальные)", "stale_non_final"
+            ),
             "coverage": {
                 "processed_issues": grand_total,
                 "complete": complete,
@@ -1140,7 +1173,10 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "QA department dashboard, or a weekly QA summary. Aggregates "
             "only — no per-task tables; point the user to the specific "
             "metric tools for detail. The response fits the inline budget — "
-            "never assume truncation unless coverage reports rows_capped=true."
+            "never assume truncation unless coverage reports rows_capped=true. "
+            "Copy the pre-built fenced discipline table (key "
+            "'discipline_table') VERBATIM into the answer — never rebuild "
+            "markdown tables yourself (rebuilding collapses rows into one line)."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -1621,6 +1657,11 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             },
             "defects": defects_block,
             "discipline": discipline_per_queue,
+            "discipline_table": _discipline_table(
+                discipline_per_queue,
+                "Залежались >30д (не финальные)",
+                "stale_non_final_30d",
+            ),
             "reporting_contract": {
                 "aggregates_only_no_tables": True,
                 "cycle_and_returns_are_sampled": True,

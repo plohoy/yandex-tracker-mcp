@@ -702,3 +702,28 @@ class TestSprintCarryoverAllQueues:
         assert content["per_queue"]["Q1"]["status"] == "complete"
         assert content["per_queue"]["Q2"]["status"] == "board_not_found"
         assert content["per_queue"]["Q1"]["carried_over"] == 0
+
+
+class TestDisciplineTable:
+    def test_fenced_table_has_row_newlines(self) -> None:
+        from mcp_tracker.mcp.tools.metrics import _discipline_table
+
+        table = _discipline_table(
+            {
+                "Q1": {
+                    "issues_total": 100,
+                    "without_estimation": {"count": 76, "share": 0.762},
+                    "without_spent": {"count": 90, "share": 0.9},
+                    "without_description": {"count": 20, "share": 0.2},
+                    "stale_non_final": 12,
+                }
+            },
+            "Залежались >30д (не финальные)",
+            "stale_non_final",
+        )
+        lines = table.splitlines()
+        assert lines[0] == "```"
+        assert "76.2% (76)" in table
+        assert lines[-1] == "```"
+        # every markdown row on its own line (the bug: one collapsed line)
+        assert sum(1 for l in lines if l.startswith("|")) == 3
