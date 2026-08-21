@@ -852,6 +852,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
                 raise ValueError("queue must be a Yandex Tracker queue key")
         issues_api = ctx.request_context.lifespan_context.issues
+        queues_api = ctx.request_context.lifespan_context.queues
         auth = get_yandex_auth(ctx)
         now = _now()
         today = now.date().isoformat()
@@ -860,28 +861,49 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         release_queue: str | None = None
         release_version: int | None = None
         release_name: str | None = None
+
+        def _version_value(version: Any, *names: str) -> Any:
+            for name in names:
+                value = (
+                    version.get(name)
+                    if isinstance(version, dict)
+                    else getattr(version, name, None)
+                )
+                if value:
+                    return value
+            return None
+
         if version_id is not None:
             release_queue, release_version = queues[0], version_id
         else:
             for queue in queues:
                 try:
-                    versions = await issues_api.queue_get_versions(queue, auth=auth)
-                except Exception:  # noqa: BLE001 — version resolution is best-effort
+                    versions = await queues_api.queues_get_versions(queue, auth=auth)
+                except Exception:  # noqa: BLE001 — resolution is best-effort
                     versions = []
                 dated = [
                     version
                     for version in versions
-                    if version.get("startDate") or version.get("start_date")
+                    if _version_value(version, "dueDate", "due_date", "startDate", "start_date")
                 ]
                 if dated:
                     dated.sort(
-                        key=lambda version: str(
-                            version.get("startDate") or version.get("start_date") or ""
+                        key=lambda version: (
+                            str(
+                                _version_value(
+                                    version, "dueDate", "due_date", "startDate", "start_date"
+                                )
+                                or ""
+                            ),
+                            int(_version_value(version, "id") or 0),
                         ),
                         reverse=True,
                     )
-                    release_queue, release_version = queue, int(dated[0]["id"])
-                    release_name = dated[0].get("name")
+                    release_queue, release_version = (
+                        queue,
+                        int(_version_value(dated[0], "id")),
+                    )
+                    release_name = _version_value(dated[0], "name")
                     break
 
         release: dict[str, Any] | None = None
