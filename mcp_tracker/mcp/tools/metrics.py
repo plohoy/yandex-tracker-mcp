@@ -311,7 +311,8 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "release version. Changelog per issue is cached server-side; "
             "the in-rework table is capped (rows_capped in coverage). "
             "Use for «цикл тестирования», «сколько длится тестирование», "
-            "«время реворка»."
+            "«время реворка». The response fits the inline budget — never "
+            "assume truncation unless coverage reports rows_capped=true."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -496,7 +497,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "escape_marker, e.g. «прод»). Use for «тренд багов», «старение "
             "багов», «утечки в прод» across the department. Closed dates are "
             "approximated by updated_at (reporting_contract). The escape "
-            "table is capped (rows_capped in coverage)."
+            "table is capped (rows_capped in coverage). The response fits "
+            "the inline budget — never assume truncation unless coverage "
+            "reports rows_capped=true."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -1014,7 +1017,8 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "queues. Use whenever the user asks for «дашборд отдела QA», the "
             "QA department dashboard, or a weekly QA summary. Aggregates "
             "only — no per-task tables; point the user to the specific "
-            "metric tools for detail."
+            "metric tools for detail. The response fits the inline budget — "
+            "never assume truncation unless coverage reports rows_capped=true."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
