@@ -261,3 +261,41 @@ class TestSprintCarryover:
         assert content["status"] == "ambiguous_board"
         assert content["complete"] is False
         assert len(content["candidate_boards"]) == 2
+
+    async def test_board_not_found_lists_all_boards(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        boards = [{"id": 7, "name": "Доска проекта AndroidSDK"}]
+        mock_issues_protocol.boards_get_all = AsyncMock(return_value=boards)
+
+        result = await client_session.call_tool(
+            "issues_metrics_sprint_carryover", {"queue": "TEST"}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["status"] == "board_not_found"
+        assert content["all_boards"] == [{"id": 7, "name": "Доска проекта AndroidSDK"}]
+
+
+class TestSampling:
+    async def test_drain_samples_over_max_issues(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        # 250 issues in two 100-row pages + one 50-row page; max_issues=100
+        # stops the drain at 100 and reports complete=False.
+        page1 = [_issue(f"TEST-{i}") for i in range(1, 101)]
+        page2 = [_issue(f"TEST-{i}") for i in range(101, 201)]
+        page3 = [_issue(f"TEST-{i}") for i in range(201, 251)]
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            side_effect=[page1, page2, page3]
+        )
+        mock_issues_protocol.issue_get_status_changelog = AsyncMock(return_value=[])
+
+        result = await client_session.call_tool(
+            "issues_metrics_testing_cycle",
+            {"queue": "TEST", "max_issues": 100},
+        )
+
+        content = get_tool_result_content(result)
+        assert content["issues_scanned"] == 100
+        assert content["coverage"]["complete"] is False

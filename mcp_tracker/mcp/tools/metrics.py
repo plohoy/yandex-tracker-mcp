@@ -83,7 +83,12 @@ async def _drain_filtered(
     max_issues: int,
     log_name: str,
 ) -> tuple[list[Any], bool]:
-    """Paginated issues_find_filter drain (100/page) up to max_issues."""
+    """Paginated issues_find_filter drain (100/page) up to max_issues.
+
+    Returns (issues, complete). When the queue holds more than max_issues
+    the drain stops at the limit and complete=False (a sample — callers
+    report it in coverage); unstable pagination still fails closed.
+    """
     issues: list[Any] = []
     seen: set[str] = set()
     page = 1
@@ -102,8 +107,8 @@ async def _drain_filtered(
                 raise RuntimeError(f"{log_name}: unstable pagination at page {page}")
             seen.add(issue.key)
             issues.append(issue)
-            if len(issues) > max_issues:
-                raise ValueError(f"{log_name}: exceeds max_issues={max_issues}")
+            if len(issues) >= max_issues:
+                return issues, False
         if len(batch) < 100:
             return issues, True
         page += 1
@@ -432,7 +437,11 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         issues, complete = await _drain_filtered(
             issues_api,
             auth,
-            {"queue": queue, "type": bug_type_keys, "created": {"from": created_after, "to": end}},
+            {
+                "queue": queue,
+                "type": bug_type_keys,
+                "created": {"from": created_after, "to": end},
+            },
             [
                 "key",
                 "summary",
@@ -691,6 +700,10 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                     "candidate_boards": [
                         {"id": board.get("id"), "name": board.get("name")}
                         for board in candidates
+                    ],
+                    "all_boards": [
+                        {"id": board.get("id"), "name": board.get("name")}
+                        for board in boards
                     ],
                     "required_action": "Supply board_id; do not report a carryover count.",
                 }
