@@ -1055,18 +1055,92 @@ async def issues_created_open_core(
     updated_before: str | None = None,
     page: int = 1,
     per_page: int = 25,
+    aggregate: bool = False,
+    max_issues: int = 2_000,
 ) -> dict[str, Any]:
-    """Open issues created by a user (see _open_issues_by_person_core)."""
-    return await _open_issues_by_person_core(
-        issues_api,
-        auth,
-        users_api=users_api,
-        person=creator,
-        role="creator",
-        updated_before=updated_before,
-        page=page,
-        per_page=per_page,
-    )
+    """Open issues created by a user (see _open_issues_by_person_core).
+
+    With aggregate=True: org-wide per-creator breakdown of open issues
+    (top creators by count, with per-queue split) — one call for
+    «долги по создателям».
+    """
+    if not aggregate:
+        return await _open_issues_by_person_core(
+            issues_api,
+            auth,
+            users_api=users_api,
+            person=creator,
+            role="creator",
+            updated_before=updated_before,
+            page=page,
+            per_page=per_page,
+        )
+    cutoff = _parse_updated_before(updated_before) if updated_before else None
+    drained: list[Any] = []
+    seen: set[str] = set()
+    complete = True
+    page_number = 1
+    while len(drained) < max_issues:
+        batch = await issues_api.issues_find_filter(
+            {},
+            fields=["key", "createdBy", "queue", "updatedAt", "statusType"],
+            per_page=100,
+            page=page_number,
+            auth=auth,
+        )
+        if not batch:
+            break
+        for issue in batch:
+            if issue.key in seen:
+                raise RuntimeError(f"unstable pagination at page {page_number}")
+            seen.add(issue.key)
+            st = _reference_key(getattr(issue, "statusType", None))
+            if st in _FINAL_STATUS_TYPE_KEYS:
+                continue
+            if cutoff is not None and issue.updated_at is not None:
+                if _to_utc(issue.updated_at) >= cutoff:
+                    continue
+            drained.append(issue)
+            if len(drained) >= max_issues:
+                complete = False
+                break
+        if len(batch) < 100:
+            break
+        page_number += 1
+    creators: dict[str, Counter[str]] = {}
+    for issue in drained:
+        display = (
+            _reference_display(getattr(issue, "created_by", None)) or "неизвестен"
+        )
+        queue_key = _reference_key(getattr(issue, "queue", None)) or "?"
+        creators.setdefault(display, Counter())[queue_key] += 1
+    top = sorted(creators.items(), key=lambda item: -sum(item[1].values()))[:15]
+    return {
+        "status": "complete",
+        "complete": complete,
+        "scope": "all_creators_org_wide_open",
+        "aggregate_by_creator": True,
+        "drained_issues": len(drained),
+        "top_creators": [
+            {"creator": display, "total": sum(counts.values()), "queues": dict(counts)}
+            for display, counts in top
+        ],
+        "creators_total": len(creators),
+        "coverage": {
+            "complete": complete,
+            "drained_capped": len(drained) >= max_issues,
+            "order": "updated_at desc (most recently updated first)",
+            "sample_note": (
+                "aggregation covers the first max_issues open issues; pass "
+                "updated_before to scope to stale debts"
+            ),
+        },
+        "reporting_contract": {
+            "open_definition": _ASSIGNED_OPEN_DEFINITION,
+            "creator_display_names": True,
+            "queues_are_keys": True,
+        },
+    }
 
 
 def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
@@ -1404,6 +1478,18 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 ),
             ),
         ] = 25,
+        aggregate: Annotated[
+            bool,
+            Field(
+                description=(
+                    "If true, ignore creator and return the org-wide per-creator "
+                    "breakdown of open issues (top creators with per-queue split) "
+                    "in ONE call — use for «долги по создателям» (org-wide), "
+                    "«кто создал много открытых задач». Default false."
+                )
+            ),
+        ] = False,
+        max_issues: Annotated[int, Field(ge=1, le=10_000)] = 2_000,
     ) -> dict[str, Any]:
         lifespan = ctx.request_context.lifespan_context
         return await issues_created_open_core(
@@ -1414,6 +1500,8 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             updated_before=updated_before,
             page=page,
             per_page=per_page,
+            aggregate=aggregate,
+            max_issues=max_issues,
         )
 
     @mcp.tool(

@@ -32,6 +32,7 @@ def _issue(
     sprints: list[int] | None = None,
     resolution: str | None = None,
     assignee: str | None = None,
+    created_by: str | None = None,
 ) -> Issue:
     return Issue.model_construct(
         id=key,
@@ -62,6 +63,9 @@ def _issue(
         ],
         resolution=resolution,
         assignee=UserReference.model_construct(display=assignee) if assignee else None,
+        created_by=UserReference.model_construct(display=created_by)
+        if created_by
+        else None,
     )
 
 
@@ -619,3 +623,29 @@ class TestQaWorkset:
             "не назначен": {"qa_ready": 1, "qa_active": 0, "total": 1}
         }
         assert content["filter"]["assignee"] == "не назначен"
+
+
+class TestCreatedOpenAggregate:
+    async def test_aggregate_groups_by_creator(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        issues = [
+            _issue("TEST-1", status_type="open", created_by="Иван", updated_at=now),
+            _issue("TEST-2", status_type="open", created_by="Пётр", updated_at=now),
+            _issue("TEST-3", status_type="done", created_by="Иван", updated_at=now),
+            _issue("TEST-4", status_type="open", created_by="Иван", updated_at=now),
+        ]
+        mock_issues_protocol.issues_find_filter = AsyncMock(side_effect=[issues, []])
+
+        result = await client_session.call_tool(
+            "issues_created_open", {"aggregate": True}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["scope"] == "all_creators_org_wide_open"
+        assert content["drained_issues"] == 3  # TEST-3 closed, excluded
+        assert content["top_creators"][0]["creator"] == "Иван"
+        assert content["top_creators"][0]["total"] == 2
+        assert content["top_creators"][1]["creator"] == "Пётр"
+        assert content["top_creators"][1]["total"] == 1
