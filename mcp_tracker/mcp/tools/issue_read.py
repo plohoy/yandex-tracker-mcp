@@ -1542,6 +1542,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "summary/table requests and for stale QA worksets. Pass stale_updated_before "
             "and/or sprint_ended_before to return only stale rows, with title, updated date, "
             "and machine-derived reasons. For counts-only summaries set include_table=false "
+            "(the table is capped to the response budget otherwise; rows_capped in coverage)."
             "to avoid returning every issue row. "
             "Never substitute issues_find or infer totals from "
             "its 20-item page. Input queue keys must already be resolved through queues_get_all."
@@ -1830,7 +1831,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             compact_rows, page, per_page
         )
         coverage.update(pagination_info)
-        return {
+        response = {
             "status": "complete",
             "complete": True,
             "scope": "entire_queues",
@@ -1898,6 +1899,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 "counts_only_must_set_include_table_false": True,
             },
         }
+        return _cap_rows_for_budget(response, "table")
 
     @mcp.tool(
         title="Count Queue Issues in the Current Sprint by Status",
