@@ -315,10 +315,11 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     )
     async def issues_metrics_testing_cycle(
         ctx: Context[Any, AppContext],
-        queue: Annotated[
-            str | None,
+        queues: Annotated[
+            list[str] | None,
             Field(
-                description="Queue key; default: ALL queues (org-wide sample up to max_issues)"
+                max_length=10,
+                description="Queue keys; default: ALL queues (org-wide sample up to max_issues)",
             ),
         ] = None,
         version_id: Annotated[
@@ -326,13 +327,14 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ] = None,
         max_issues: Annotated[int, Field(ge=1, le=2_000)] = 500,
     ) -> dict[str, Any]:
-        if queue is not None and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
-            raise ValueError("queue must be a Yandex Tracker queue key")
+        for q in queues or []:
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", q):
+                raise ValueError("queues must be Yandex Tracker queue keys")
         app = ctx.request_context.lifespan_context
         issues_api = app.issues
         auth = get_yandex_auth(ctx)
-        if queue is not None:
-            scope = [queue]
+        if queues is not None:
+            scope = list(queues)
         else:
             scope = [
                 q.key
@@ -673,10 +675,11 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     )
     async def issues_metrics_data_discipline(
         ctx: Context[Any, AppContext],
-        queue: Annotated[
-            str | None,
+        queues: Annotated[
+            list[str] | None,
             Field(
-                description="Queue key; default: ALL queues with per-queue breakdown and org-wide totals"
+                max_length=10,
+                description="Queue keys; default: ALL queues with per-queue breakdown and org-wide totals",
             ),
         ] = None,
         stale_days: Annotated[
@@ -689,13 +692,14 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ] = 30,
         max_issues: Annotated[int, Field(ge=1, le=10_000)] = 2_000,
     ) -> dict[str, Any]:
-        if queue is not None and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
-            raise ValueError("queue must be a Yandex Tracker queue key")
+        for q in queues or []:
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", q):
+                raise ValueError("queues must be Yandex Tracker queue keys")
         app = ctx.request_context.lifespan_context
         issues_api = app.issues
         auth = get_yandex_auth(ctx)
-        if queue is not None:
-            scope = [queue]
+        if queues is not None:
+            scope = list(queues)
         else:
             scope = [
                 q.key

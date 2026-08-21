@@ -151,7 +151,7 @@ class TestTestingCycle:
         )
 
         result = await client_session.call_tool(
-            "issues_metrics_testing_cycle", {"queue": "TEST"}
+            "issues_metrics_testing_cycle", {"queues": ["TEST"]}
         )
 
         content = get_tool_result_content(result)
@@ -258,7 +258,7 @@ class TestDataDiscipline:
         mock_issues_protocol.issues_find_filter = AsyncMock(return_value=issues)
 
         result = await client_session.call_tool(
-            "issues_metrics_data_discipline", {"queue": "TEST", "stale_days": 30}
+            "issues_metrics_data_discipline", {"queues": ["TEST"], "stale_days": 30}
         )
 
         content = get_tool_result_content(result)
