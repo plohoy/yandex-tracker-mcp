@@ -728,5 +728,5 @@ class TestDisciplineTable:
         assert "|" not in table
         assert "76.2% (76)" in table
         # every row on its own line (the bug: one collapsed line)
-        assert sum(1 for l in lines if l.strip().startswith("Q1")) == 1
-        assert sum(1 for l in lines if l.strip().startswith("Очередь")) == 1
+        assert sum(1 for line in lines if line.strip().startswith("Q1")) == 1
+        assert sum(1 for line in lines if line.strip().startswith("Очередь")) == 1
