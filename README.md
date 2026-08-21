@@ -59,6 +59,23 @@ intentionally stays on 0.7.1 because the runtime integration depends on
 - `issues_metrics_sprint_carryover` — carried-over issues between the two
   most recent sprints (board resolution, ambiguous → candidates)
 
+**Dashboard aliases (short commands for the agent / ready-to-paste):**
+
+| Alias | Expands to |
+|---|---|
+| `дашборд отдела QA` | `issues_metrics_qa_dashboard` (org-wide workset + active release + cycle + defects + discipline, one call) |
+| `готовность релиза X` | `issues_metrics_release_readiness(queue, version_id)` |
+| `возвраты релиза X` | `issues_count_release_status_returns(include_evidence=false, returned_only=true)` |
+| `оценки релиза X` | `issues_summarize_effort` twice (estimation + spent) + % without estimation |
+| `цикл тестирования` | `issues_metrics_testing_cycle(queue, max_issues)` |
+| `тренд багов` | `issues_metrics_defect_trend(queue, created_after)` |
+| `утечки в прод` | `issues_metrics_defect_trend(..., escape_marker=«прод»)` |
+| `загрузка тестировщиков` | `issues_assigned_open` per QA member |
+| `долги по создателям` | `issues_created_open` per creator |
+| `дисциплина данных` | `issues_metrics_data_discipline(queue, stale_days)` |
+| `переносы спринтов` | `issues_metrics_sprint_carryover(queue, board_id?)` |
+| `залежавшиеся у X` | `issues_assigned_open(assignee, updated_before=2 месяца)` |
+
 **Modified tools / contracts:**
 
 - `issues_count_release_status_returns` — compact mode:
