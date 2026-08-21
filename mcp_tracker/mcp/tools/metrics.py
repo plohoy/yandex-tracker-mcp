@@ -319,7 +319,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             list[str] | None,
             Field(
                 max_length=10,
-                description="Queue keys; default: ALL queues (org-wide sample up to max_issues in total). When queues are given, max_issues applies PER QUEUE.",
+                description="Queue keys; default: ALL queues (org-wide sample up to max_issues in total). When queues are given, max_issues applies PER QUEUE but the sample is auto-bounded so the call fits a 300s agent timeout (~1600 changelogs total); pass max_issues explicitly to override.",
             ),
         ] = None,
         version_id: Annotated[
@@ -357,11 +357,18 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         complete = True
         collected = 0
         per_queue_cap = queues is not None
+        per_queue_limit = (
+            max(50, min(max_issues, 1600 // len(scope))) if per_queue_cap else None
+        )
         for q in scope:
             filters: dict[str, object] = {"queue": q}
             if version_id is not None:
                 filters["fixVersions"] = version_id
-            limit = max_issues if per_queue_cap else max_issues - collected
+            if per_queue_cap:
+                assert per_queue_limit is not None
+                limit = per_queue_limit
+            else:
+                limit = max_issues - collected
             if limit <= 0:
                 break
             batch, q_complete = await _drain_filtered(
