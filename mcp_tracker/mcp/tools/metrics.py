@@ -432,7 +432,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         issues, complete = await _drain_filtered(
             issues_api,
             auth,
-            {"queue": queue, "type": bug_type_keys, "created": [created_after, end]},
+            {"queue": queue, "type": bug_type_keys, "created": {"from": created_after, "to": end}},
             [
                 "key",
                 "summary",
