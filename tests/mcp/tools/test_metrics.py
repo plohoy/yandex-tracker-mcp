@@ -107,6 +107,21 @@ class TestReleaseReadiness:
         assert content["estimation_coverage"]["share_with_value"] == round(1 / 3, 3)
         assert content["defect_density"]["bugs"] == 1
 
+    async def test_metrics_without_queue_filters_by_version_only(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        issues = [_issue("TEST-1", status_type="open")]
+        mock_issues_protocol.issues_find_filter = AsyncMock(return_value=issues)
+
+        result = await client_session.call_tool(
+            "issues_metrics_release_readiness", {"version_id": 1}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["status"] == "complete"
+        assert content["issues_total"] == 1
+        assert content["queue"] is None  # no queue field on the mock issue
+
 
 class TestTestingCycle:
     async def test_cycles_and_rework(
@@ -242,12 +257,14 @@ class TestDataDiscipline:
         )
 
         content = get_tool_result_content(result)
-        assert content["issues_total"] == 2
-        assert content["without_estimation"]["count"] == 1
-        assert content["without_spent"]["count"] == 1
-        assert content["without_description"]["count"] == 1
-        assert content["stale_non_final"] == 1
+        assert content["totals"]["issues_total"] == 2
+        assert content["totals"]["without_estimation"]["count"] == 1
+        assert content["totals"]["without_spent"]["count"] == 1
+        assert content["totals"]["without_description"]["count"] == 1
+        assert content["totals"]["stale_non_final"] == 1
+        assert content["per_queue"]["TEST"]["without_estimation"]["count"] == 1
         assert content["stale_table"][0]["key"] == "TEST-1"
+        assert content["stale_table"][0]["queue"] == "TEST"
 
 
 class TestSprintCarryover:

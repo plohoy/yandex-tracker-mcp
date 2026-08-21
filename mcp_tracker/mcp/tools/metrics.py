@@ -189,21 +189,30 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     )
     async def issues_metrics_release_readiness(
         ctx: Context[Any, AppContext],
-        queue: Annotated[str, Field(min_length=1, description="Queue key")],
         version_id: Annotated[int, Field(gt=0, description="Version id")],
+        queue: Annotated[
+            str | None,
+            Field(
+                description="Queue key; optional — a version belongs to one queue, resolved from its issues"
+            ),
+        ] = None,
         max_issues: Annotated[int, Field(ge=1, le=10_000)] = 2_000,
     ) -> dict[str, Any]:
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
+        if queue is not None and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
             raise ValueError("queue must be a Yandex Tracker queue key")
         issues_api = ctx.request_context.lifespan_context.issues
         auth = get_yandex_auth(ctx)
+        filters: dict[str, object] = {"fixVersions": version_id}
+        if queue is not None:
+            filters["queue"] = queue
         issues, complete = await _drain_filtered(
             issues_api,
             auth,
-            {"queue": queue, "fixVersions": version_id},
+            filters,
             [
                 "key",
                 "summary",
+                "queue",
                 "status",
                 "statusType",
                 "priority",
@@ -212,6 +221,12 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             ],
             max_issues,
             "release_readiness",
+        )
+        resolved_queue = queue or (
+            _reference_display(getattr(issues[0], "queue", None))
+            or _reference_key(getattr(issues[0], "queue", None))
+            if issues
+            else None
         )
         status_types: Counter[str] = Counter()
         open_critical: list[dict[str, Any]] = []
@@ -251,7 +266,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         response = {
             "status": "complete",
             "complete": True,
-            "queue": queue,
+            "queue": resolved_queue,
             "version_id": version_id,
             "issues_total": total,
             "status_type_counts": dict(status_types),
@@ -299,27 +314,50 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     )
     async def issues_metrics_testing_cycle(
         ctx: Context[Any, AppContext],
-        queue: Annotated[str, Field(min_length=1, description="Queue key")],
+        queue: Annotated[
+            str | None,
+            Field(
+                description="Queue key; default: ALL queues (org-wide sample up to max_issues)"
+            ),
+        ] = None,
         version_id: Annotated[
             int | None, Field(gt=0, description="Optional release version id")
         ] = None,
         max_issues: Annotated[int, Field(ge=1, le=2_000)] = 500,
     ) -> dict[str, Any]:
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
+        if queue is not None and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
             raise ValueError("queue must be a Yandex Tracker queue key")
-        issues_api = ctx.request_context.lifespan_context.issues
+        app = ctx.request_context.lifespan_context
+        issues_api = app.issues
         auth = get_yandex_auth(ctx)
-        filters: dict[str, object] = {"queue": queue}
-        if version_id is not None:
-            filters["fixVersions"] = version_id
-        issues, complete = await _drain_filtered(
-            issues_api,
-            auth,
-            filters,
-            ["key", "summary", "status", "updatedAt"],
-            max_issues,
-            "testing_cycle",
-        )
+        if queue is not None:
+            scope = [queue]
+        else:
+            scope = [
+                q.key
+                for q in await app.queues.queues_list(auth=auth)
+                if getattr(q, "key", None)
+            ]
+        issues: list[Any] = []
+        complete = True
+        collected = 0
+        for q in scope:
+            filters: dict[str, object] = {"queue": q}
+            if version_id is not None:
+                filters["fixVersions"] = version_id
+            batch, q_complete = await _drain_filtered(
+                issues_api,
+                auth,
+                filters,
+                ["key", "summary", "status", "updatedAt"],
+                max_issues - collected,
+                "testing_cycle",
+            )
+            complete = complete and q_complete
+            issues.extend(batch)
+            collected += len(batch)
+            if collected >= max_issues:
+                break
         test_cycles = 0
         test_hours = 0.0
         reworks = 0
@@ -359,7 +397,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         response = {
             "status": "complete",
             "complete": True,
-            "queue": queue,
+            "queues": scope,
             "version_id": version_id,
             "issues_scanned": len(issues),
             "issues_with_testing_history": with_history,
@@ -591,7 +629,12 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     )
     async def issues_metrics_data_discipline(
         ctx: Context[Any, AppContext],
-        queue: Annotated[str, Field(min_length=1, description="Queue key")],
+        queue: Annotated[
+            str | None,
+            Field(
+                description="Queue key; default: ALL queues with per-queue breakdown and org-wide totals"
+            ),
+        ] = None,
         stale_days: Annotated[
             int,
             Field(
@@ -602,80 +645,134 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ] = 30,
         max_issues: Annotated[int, Field(ge=1, le=10_000)] = 2_000,
     ) -> dict[str, Any]:
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
+        if queue is not None and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
             raise ValueError("queue must be a Yandex Tracker queue key")
-        issues_api = ctx.request_context.lifespan_context.issues
+        app = ctx.request_context.lifespan_context
+        issues_api = app.issues
         auth = get_yandex_auth(ctx)
-        issues, complete = await _drain_filtered(
-            issues_api,
-            auth,
-            {"queue": queue},
-            [
-                "key",
-                "summary",
-                "status",
-                "statusType",
-                "estimation",
-                "spent",
-                "description",
-                "updatedAt",
-            ],
-            max_issues,
-            "data_discipline",
-        )
-        no_estimation = 0
-        no_spent = 0
-        no_description = 0
+        if queue is not None:
+            scope = [queue]
+        else:
+            scope = [
+                q.key
+                for q in await app.queues.queues_list(auth=auth)
+                if getattr(q, "key", None)
+            ]
         stale_cutoff = _now() - timedelta(days=stale_days)
         stale: list[dict[str, Any]] = []
-        for issue in issues:
-            if not issue.estimation:
-                no_estimation += 1
-            if not issue.spent:
-                no_spent += 1
-            if not (issue.description or "").strip():
-                no_description += 1
-            st = _reference_key(getattr(issue, "statusType", None))
-            if st not in _FINAL_STATUS_TYPE_KEYS and issue.updated_at is not None:
-                try:
-                    updated = issue.updated_at
-                    if updated.tzinfo is None:
-                        updated = updated.replace(tzinfo=timezone.utc)
-                    if updated < stale_cutoff:
-                        stale.append(
-                            {
-                                "key": issue.key,
-                                "summary": issue.summary,
-                                "updated_at": updated.isoformat(),
-                                "url": f"https://tracker.yandex.ru/{issue.key}",
-                            }
-                        )
-                except (ValueError, TypeError):
-                    pass
+        per_queue: dict[str, dict[str, Any]] = {}
+        totals = {
+            "issues_total": 0,
+            "no_estimation": 0,
+            "no_spent": 0,
+            "no_description": 0,
+            "stale_non_final": 0,
+        }
+        complete = True
+        for q in scope:
+            issues, q_complete = await _drain_filtered(
+                issues_api,
+                auth,
+                {"queue": q},
+                [
+                    "key",
+                    "summary",
+                    "status",
+                    "statusType",
+                    "estimation",
+                    "spent",
+                    "description",
+                    "updatedAt",
+                ],
+                max_issues,
+                "data_discipline",
+            )
+            complete = complete and q_complete
+            no_estimation = 0
+            no_spent = 0
+            no_description = 0
+            q_stale = 0
+            for issue in issues:
+                if not issue.estimation:
+                    no_estimation += 1
+                if not issue.spent:
+                    no_spent += 1
+                if not (issue.description or "").strip():
+                    no_description += 1
+                st = _reference_key(getattr(issue, "statusType", None))
+                if st not in _FINAL_STATUS_TYPE_KEYS and issue.updated_at is not None:
+                    try:
+                        updated = issue.updated_at
+                        if updated.tzinfo is None:
+                            updated = updated.replace(tzinfo=timezone.utc)
+                        if updated < stale_cutoff:
+                            q_stale += 1
+                            stale.append(
+                                {
+                                    "key": issue.key,
+                                    "summary": issue.summary,
+                                    "queue": q,
+                                    "updated_at": updated.isoformat(),
+                                    "url": f"https://tracker.yandex.ru/{issue.key}",
+                                }
+                            )
+                    except (ValueError, TypeError):
+                        pass
+            total = len(issues)
+            totals["issues_total"] += total
+            totals["no_estimation"] += no_estimation
+            totals["no_spent"] += no_spent
+            totals["no_description"] += no_description
+            totals["stale_non_final"] += q_stale
+            per_queue[q] = {
+                "issues_total": total,
+                "without_estimation": {
+                    "count": no_estimation,
+                    "share": round(no_estimation / total, 3) if total else None,
+                },
+                "without_spent": {
+                    "count": no_spent,
+                    "share": round(no_spent / total, 3) if total else None,
+                },
+                "without_description": {
+                    "count": no_description,
+                    "share": round(no_description / total, 3) if total else None,
+                },
+                "stale_non_final": q_stale,
+            }
         stale.sort(key=lambda row: str(row["updated_at"] or ""))
-        total = len(issues)
+        grand_total = totals["issues_total"]
         response = {
             "status": "complete",
             "complete": True,
-            "queue": queue,
+            "queues": scope,
             "stale_days": stale_days,
-            "issues_total": total,
-            "without_estimation": {
-                "count": no_estimation,
-                "share": round(no_estimation / total, 3) if total else None,
+            "totals": {
+                "issues_total": grand_total,
+                "without_estimation": {
+                    "count": totals["no_estimation"],
+                    "share": round(totals["no_estimation"] / grand_total, 3)
+                    if grand_total
+                    else None,
+                },
+                "without_spent": {
+                    "count": totals["no_spent"],
+                    "share": round(totals["no_spent"] / grand_total, 3)
+                    if grand_total
+                    else None,
+                },
+                "without_description": {
+                    "count": totals["no_description"],
+                    "share": round(totals["no_description"] / grand_total, 3)
+                    if grand_total
+                    else None,
+                },
+                "stale_non_final": totals["stale_non_final"],
             },
-            "without_spent": {
-                "count": no_spent,
-                "share": round(no_spent / total, 3) if total else None,
-            },
-            "without_description": {
-                "count": no_description,
-                "share": round(no_description / total, 3) if total else None,
-            },
-            "stale_non_final": len(stale),
+            "per_queue": per_queue,
             "stale_table": stale,
             "coverage": {
-                "processed_issues": total,
+                "processed_issues": grand_total,
                 "complete": complete,
                 "stale_definition": f"non-final and not updated for >={stale_days} days",
                 "estimation_definition": "issue.estimation present",
@@ -705,8 +802,11 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     async def issues_metrics_sprint_carryover(
         ctx: Context[Any, AppContext],
         queue: Annotated[
-            str, Field(min_length=1, description="Queue key used to find the board")
-        ],
+            str | None,
+            Field(
+                description="Queue key used to find the board; optional when board_id is given"
+            ),
+        ] = None,
         board_id: Annotated[
             int | None,
             Field(
@@ -715,12 +815,24 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ] = None,
         max_issues: Annotated[int, Field(ge=1, le=10_000)] = 2_000,
     ) -> dict[str, Any]:
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
+        if queue is not None and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
             raise ValueError("queue must be a Yandex Tracker queue key")
         issues_api = ctx.request_context.lifespan_context.issues
         auth = get_yandex_auth(ctx)
         if board_id is None:
             boards = await issues_api.boards_get_all(auth=auth)
+            if queue is None:
+                return {
+                    "status": "board_not_found",
+                    "complete": False,
+                    "queue": None,
+                    "candidate_boards": [],
+                    "all_boards": [
+                        {"id": board.get("id"), "name": board.get("name")}
+                        for board in boards
+                    ],
+                    "required_action": "Supply board_id; do not report a carryover count.",
+                }
             needle = f" {queue.casefold()} "
             candidates = [
                 board

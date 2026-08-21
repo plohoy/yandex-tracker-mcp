@@ -2184,7 +2184,10 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             str | None, Field(description="Epic issue key for scope=epic")
         ] = None,
         queue: Annotated[
-            str | None, Field(description="Queue key for scope=release")
+            str | None,
+            Field(
+                description="Queue key for scope=release; optional — the version belongs to one queue, resolved from its issues"
+            ),
         ] = None,
         version_id: Annotated[
             int | None, Field(gt=0, description="Version id for scope=release")
@@ -2210,11 +2213,13 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 raise ValueError("scope=epic requires a valid epic_key")
             filters: dict[str, object] = {"epic": epic_key}
         else:
-            if not queue or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
-                raise ValueError("scope=release requires a valid queue key")
+            if queue is not None and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
+                raise ValueError("scope=release queue key must be a valid queue key")
             if version_id is None:
                 raise ValueError("scope=release requires version_id")
-            filters = {"queue": queue, "fixVersions": version_id}
+            filters: dict[str, object] = {"fixVersions": version_id}
+            if queue:
+                filters["queue"] = queue
 
         issues_api = ctx.request_context.lifespan_context.issues
         auth = get_yandex_auth(ctx)
@@ -2340,10 +2345,15 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     )
     async def issues_count_release_status_returns(
         ctx: Context[Any, AppContext],
-        queue: Annotated[str, Field(min_length=1, description="Queue key")],
         version_id: Annotated[
             int, Field(gt=0, description="Version id from queue_get_versions")
         ],
+        queue: Annotated[
+            str | None,
+            Field(
+                description="Queue key; optional — the version belongs to one queue, resolved from its issues"
+            ),
+        ] = None,
         metric: Annotated[
             Literal["qa_rework_cycle", "testing_rework", "repeated_work_status"],
             Field(
@@ -2398,7 +2408,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             ),
         ] = None,
     ) -> dict[str, Any]:
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
+        if queue is not None and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
             raise ValueError("queue must be a Yandex Tracker queue key")
         display_pairs = [
             {"from": "Тестируется", "to": "Провал"},
@@ -2421,7 +2431,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
 
         issues_api = ctx.request_context.lifespan_context.issues
         auth = get_yandex_auth(ctx)
-        filters: dict[str, object] = {"queue": queue, "fixVersions": version_id}
+        filters: dict[str, object] = {"fixVersions": version_id}
+        if queue is not None:
+            filters["queue"] = queue
         issues: list[Issue] = []
         seen: set[str] = set()
         fetch_page = 1
