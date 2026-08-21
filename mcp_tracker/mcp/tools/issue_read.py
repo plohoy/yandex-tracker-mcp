@@ -1597,6 +1597,17 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 ),
             ),
         ] = None,
+        assignee: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional filter: keep only rows of one tester — display name, "
+                    "login, or 'не назначен'/'unassigned' for issues without an "
+                    "assignee. Use for 'покажи задачи у X', 'задачи без исполнителя'. "
+                    "Counts, assignee_counts and the table all reflect the filter."
+                )
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         if stale_updated_before and stale_for_days:
             raise ValueError("Use stale_updated_before or stale_for_days, not both")
@@ -1771,6 +1782,16 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         all_rows = sorted(
             rows_by_key.values(), key=lambda row: (row["queue"], row["key"])
         )
+        if assignee:
+            needle = assignee.casefold()
+            if needle in ("не назначен", "unassigned"):
+                all_rows = [row for row in all_rows if not row["assignee"]]
+            else:
+                all_rows = [
+                    row
+                    for row in all_rows
+                    if (row["assignee"] or "").casefold() == needle
+                ]
         stale_mode = (
             effective_updated_before is not None or sprint_ended_before is not None
         )
@@ -1831,9 +1852,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         returned_counts = Counter(row["queue"] for row in rows)
         assignee_counts: dict[str, dict[str, int]] = {}
         for row in all_rows:
-            assignee = row["assignee"] or "не назначен"
+            tester = row["assignee"] or "не назначен"
             entry = assignee_counts.setdefault(
-                assignee, {"qa_ready": 0, "qa_active": 0, "total": 0}
+                tester, {"qa_ready": 0, "qa_active": 0, "total": 0}
             )
             entry["total"] += 1
             entry[row["semantic_class"]] += 1
@@ -1875,6 +1896,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 if effective_updated_before
                 else None,
                 "stale_for_days": stale_for_days,
+                "assignee": assignee,
                 "sprint_ended_before": sprint_ended_before.isoformat()
                 if sprint_ended_before
                 else None,

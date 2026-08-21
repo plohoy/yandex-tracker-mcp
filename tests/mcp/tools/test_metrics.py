@@ -582,3 +582,40 @@ class TestQaWorkset:
             "Пётр": {"qa_ready": 1, "qa_active": 0, "total": 1},
         }
         assert content["total_unique"] == 3
+
+    async def test_assignee_filter_unassigned(
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_fields_protocol: AsyncMock,
+    ) -> None:
+        from mcp_tracker.tracker.proto.types.statuses import Status
+
+        mock_fields_protocol.get_statuses = AsyncMock(
+            return_value=[
+                Status.model_construct(
+                    key="readyForTest", name="Можно тестировать (qa_ready)"
+                ),
+                Status.model_construct(key="testing", name="Тестируется"),
+            ]
+        )
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            side_effect=[
+                [_issue("TEST-1", assignee="Иван"), _issue("TEST-2")],
+                [_issue("TEST-3", assignee="Иван")],
+            ]
+        )
+
+        result = await client_session.call_tool(
+            "issues_list_qa_workset",
+            {"queues": ["TEST"], "assignee": "не назначен"},
+        )
+
+        content = get_tool_result_content(result)
+        assert content["total_unique"] == 1
+        assert content["returned_total"] == 1
+        assert content["table"][0]["key"] == "TEST-2"
+        assert content["assignee_counts"] == {
+            "не назначен": {"qa_ready": 1, "qa_active": 0, "total": 1}
+        }
+        assert content["filter"]["assignee"] == "не назначен"
