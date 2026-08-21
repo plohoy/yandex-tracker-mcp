@@ -64,17 +64,43 @@ intentionally stays on 0.7.1 because the runtime integration depends on
 | Alias | Expands to |
 |---|---|
 | `дашборд отдела QA` | `issues_metrics_qa_dashboard` (org-wide workset + active release + cycle + defects + discipline, one call) |
-| `готовность релиза X` | `issues_metrics_release_readiness(queue, version_id)` |
+| `готовность релиза X` | `issues_metrics_release_readiness(version_id, queue?)` |
 | `возвраты релиза X` | `issues_count_release_status_returns(include_evidence=false, returned_only=true)` |
 | `оценки релиза X` | `issues_summarize_effort` twice (estimation + spent) + % without estimation |
 | `цикл тестирования` | `issues_metrics_testing_cycle(queue, max_issues)` |
-| `тренд багов` | `issues_metrics_defect_trend(queue, created_after)` |
-| `утечки в прод` | `issues_metrics_defect_trend(..., escape_marker=«прод»)` |
+| `тренд багов` | `issues_metrics_defect_trend(created_after, queues? — org-wide)` |
+| `утечки в прод` | `issues_metrics_defect_trend(created_after, escape_marker=«прод») — org-wide` |
 | `загрузка тестировщиков` | `issues_assigned_open` per QA member |
 | `долги по создателям` | `issues_created_open` per creator |
-| `дисциплина данных` | `issues_metrics_data_discipline(queue, stale_days)` |
-| `переносы спринтов` | `issues_metrics_sprint_carryover(queue, board_id?)` |
+| `дисциплина данных` | `issues_metrics_data_discipline(queue? — org-wide, stale_days)` |
+| `переносы спринтов` | `issues_metrics_sprint_carryover(queue?, board_id?)` |
 | `залежавшиеся у X` | `issues_assigned_open(assignee, updated_before=2 месяца)` |
+
+**Agent-harness behaviour notes** — this fork is hardened for LLM agents
+driving the server through a harness (Hermes, Claude Code, custom loops), not
+just for manual tool use:
+
+- *Observed phenomenon* (Qwen3.8-27B, 64K context, local): the same model
+  follows the tool contracts perfectly in a *minimal* harness (~10 tools,
+  ~500-token system prompt, no other tools): page=1 → page=2 → answer, zero
+  redundant calls. In a *full* agent harness (50+ tools, 18-24K-token system
+  prompt, terminal/file/skills/session-search escape hatches, injected
+  memory) the same model can degrade: re-fetching already-collected rows,
+  looping on skills listing, escaping into terminal scripts. That is
+  attention dilution + escape-hatch availability, not a server bug.
+- *Mitigations live inside the tool contracts*, so no harness changes are
+  required: positive pagination (`page=1`/`per_page=25` by default, "Never
+  call the same page twice" — the model follows positive contracts it ignores
+  negative prohibitions), anti-refetch schema notes ("if rows_capped is
+  absent, 'matches' is complete — do NOT re-call"), `updated_before`
+  server-side filtering before the size cap, and org-wide defaults (the QA
+  metrics tools default to ALL queues; `queue` is optional everywhere and
+  version-only filters resolve the queue from the issues).
+- *Example Hermes prompts* (production, work as-is): «дашборд отдела QA» →
+  one `issues_metrics_qa_dashboard` call (~4-6 KB: active release readiness +
+  return rate + testing cycle + org-wide workset + data discipline);
+  «тренд багов за 30 дней» → one `issues_metrics_defect_trend` call
+  (~4 KB: weekly trend, aging buckets, escapes across all queues).
 
 **Modified tools / contracts:**
 
