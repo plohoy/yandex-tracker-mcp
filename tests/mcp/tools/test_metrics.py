@@ -12,6 +12,7 @@ from mcp_tracker.tracker.proto.types.issues import (
     SprintReference,
     StatusReference,
 )
+from mcp_tracker.tracker.proto.types.refs import UserReference
 from tests.mcp.conftest import get_tool_result_content
 
 
@@ -30,6 +31,7 @@ def _issue(
     tags: list[str] | None = None,
     sprints: list[int] | None = None,
     resolution: str | None = None,
+    assignee: str | None = None,
 ) -> Issue:
     return Issue.model_construct(
         id=key,
@@ -59,6 +61,7 @@ def _issue(
             for sid in (sprints or [])
         ],
         resolution=resolution,
+        assignee=UserReference.model_construct(display=assignee) if assignee else None,
     )
 
 
@@ -543,3 +546,39 @@ class TestQaDashboard:
         assert content["workset"]["per_queue"]["Q1"]["in_testing"] == 1
         assert content["workset"]["per_queue"]["Q2"]["in_testing"] == 0
         assert set(content["discipline"]) == {"YOURQUEUE", "TESTQUEUE"}
+
+
+class TestQaWorkset:
+    async def test_assignee_counts_aggregate_per_tester(
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_fields_protocol: AsyncMock,
+    ) -> None:
+        from mcp_tracker.tracker.proto.types.statuses import Status
+
+        mock_fields_protocol.get_statuses = AsyncMock(
+            return_value=[
+                Status.model_construct(
+                    key="readyForTest", name="Можно тестировать (qa_ready)"
+                ),
+                Status.model_construct(key="testing", name="Тестируется"),
+            ]
+        )
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            side_effect=[
+                [_issue("TEST-1", assignee="Иван"), _issue("TEST-2", assignee="Пётр")],
+                [_issue("TEST-3", assignee="Иван")],
+            ]
+        )
+
+        result = await client_session.call_tool(
+            "issues_list_qa_workset", {"queues": ["TEST"]}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["assignee_counts"] == {
+            "Иван": {"qa_ready": 1, "qa_active": 1, "total": 2},
+            "Пётр": {"qa_ready": 1, "qa_active": 0, "total": 1},
+        }
+        assert content["total_unique"] == 3

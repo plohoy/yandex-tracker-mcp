@@ -1542,8 +1542,10 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "summary/table requests and for stale QA worksets. Pass stale_updated_before "
             "and/or sprint_ended_before to return only stale rows, with title, updated date, "
             "and machine-derived reasons. For counts-only summaries set include_table=false "
-            "(the table is capped to the response budget otherwise; rows_capped in coverage)."
+            "(the table is capped to the response budget otherwise; rows_capped in coverage) "
             "to avoid returning every issue row. "
+            "assignee_counts gives the per-tester load (qa_ready/qa_active/total) — use for "
+            "'загрузка тестировщиков', 'у кого больше всего в тестировании'. "
             "Never substitute issues_find or infer totals from "
             "its 20-item page. Input queue keys must already be resolved through queues_get_all."
         ),
@@ -1827,6 +1829,14 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             compact_rows.append(compact)
         counts = Counter((row["queue"], row["semantic_class"]) for row in all_rows)
         returned_counts = Counter(row["queue"] for row in rows)
+        assignee_counts: dict[str, dict[str, int]] = {}
+        for row in all_rows:
+            assignee = row["assignee"] or "не назначен"
+            entry = assignee_counts.setdefault(
+                assignee, {"qa_ready": 0, "qa_active": 0, "total": 0}
+            )
+            entry["total"] += 1
+            entry[row["semantic_class"]] += 1
         compact_rows, pagination_info = _pagination_coverage(
             compact_rows, page, per_page
         )
@@ -1850,6 +1860,13 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 }
                 for queue in canonical
             },
+            "assignee_counts": dict(
+                sorted(
+                    assignee_counts.items(),
+                    key=lambda item: item[1]["total"],
+                    reverse=True,
+                )
+            ),
             "total_unique": len(all_rows),
             "returned_total": len(rows),
             "returned_counts": {queue: returned_counts[queue] for queue in canonical},
