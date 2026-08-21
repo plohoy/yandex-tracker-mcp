@@ -795,35 +795,38 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         title="QA Department Dashboard",
         description=(
             "Weekly QA-department dashboard («дашборд отдела QA»): ONE call "
-            "returns aggregates for the QA org's queues (default YOURQUEUE "
-            "and TESTQUEUE) — release readiness and return rate for the "
-            "latest release version (auto-resolved), defect trend and escapes, "
-            "testing-cycle averages from status history (sampled), QA workset "
-            "(in testing / stale) and data discipline per queue. Use whenever "
-            "the user asks for «дашборд отдела QA», the QA department "
-            "dashboard, or a weekly QA summary. Aggregates only — no per-task "
-            "tables; point the user to the specific metric tools for detail. "
-            "The release and cycle blocks use version_id when given, "
-            "otherwise the latest dated version of the first queue that has "
-            "versions."
+            "returns the org-wide QA load — in-testing and stale issues per "
+            "queue across ALL queues (or the queues given) — plus release "
+            "readiness and return rate for the active release (auto-resolved "
+            "to the most loaded un-released version), testing-cycle averages "
+            "from status history (sampled), defect trend and escapes for the "
+            "release queue, and data discipline for the release and QA-team "
+            "queues. Use whenever the user asks for «дашборд отдела QA», the "
+            "QA department dashboard, or a weekly QA summary. Aggregates "
+            "only — no per-task tables; point the user to the specific "
+            "metric tools for detail."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
     async def issues_metrics_qa_dashboard(
         ctx: Context[Any, AppContext],
         queues: Annotated[
-            list[str],
+            list[str] | None,
             Field(
-                min_length=1,
-                max_length=5,
-                description="Queue keys (default: YOURQUEUE, TESTQUEUE)",
+                max_length=10,
+                description=(
+                    "Queue keys for the workset scope; default: ALL queues. "
+                    "Release/discipline always use YOURQUEUE+TESTQUEUE "
+                    "unless queues is given (then its first queue anchors the "
+                    "release)."
+                ),
             ),
-        ] = Field(default_factory=lambda: ["YOURQUEUE", "TESTQUEUE"]),
+        ] = None,
         version_id: Annotated[
             int | None,
             Field(
                 gt=0,
-                description="Release version id; default: latest dated version of the first queue that has versions",
+                description="Release version id; default: auto-resolve the most loaded un-released version",
             ),
         ] = None,
         created_after: Annotated[
@@ -848,11 +851,13 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ] = 100,
         max_issues: Annotated[int, Field(ge=100, le=10_000)] = 2_000,
     ) -> dict[str, Any]:
-        for queue in queues:
+        release_scope = queues or ["YOURQUEUE", "TESTQUEUE"]
+        for queue in release_scope:
             if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
                 raise ValueError("queue must be a Yandex Tracker queue key")
-        issues_api = ctx.request_context.lifespan_context.issues
-        queues_api = ctx.request_context.lifespan_context.queues
+        app = ctx.request_context.lifespan_context
+        issues_api = app.issues
+        queues_api = app.queues
         auth = get_yandex_auth(ctx)
         now = _now()
         today = now.date().isoformat()
@@ -874,9 +879,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             return None
 
         if version_id is not None:
-            release_queue, release_version = queues[0], version_id
+            release_queue, release_version = release_scope[0], version_id
         else:
-            for queue in queues:
+            for queue in release_scope:
                 try:
                     versions = await queues_api.queues_get_versions(queue, auth=auth)
                 except Exception:  # noqa: BLE001 — resolution is best-effort
@@ -884,14 +889,20 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 dated = [
                     version
                     for version in versions
-                    if _version_value(version, "dueDate", "due_date", "startDate", "start_date")
+                    if _version_value(
+                        version, "dueDate", "due_date", "startDate", "start_date"
+                    )
                 ]
                 if dated:
                     dated.sort(
                         key=lambda version: (
                             str(
                                 _version_value(
-                                    version, "dueDate", "due_date", "startDate", "start_date"
+                                    version,
+                                    "dueDate",
+                                    "due_date",
+                                    "startDate",
+                                    "start_date",
                                 )
                                 or ""
                             ),
@@ -913,7 +924,10 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                         candidate_issues, _ = await _drain_filtered(
                             issues_api,
                             auth,
-                            {"queue": queue, "fixVersions": int(_version_value(candidate, "id"))},
+                            {
+                                "queue": queue,
+                                "fixVersions": int(_version_value(candidate, "id")),
+                            },
                             ["key"],
                             max_issues,
                             "qa_dashboard.version_count",
@@ -1047,76 +1061,74 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 "coverage": {"sampled": True, "sample_limit": sample},
             }
 
-        per_queue: dict[str, dict[str, Any]] = {}
-        for queue in queues:
-            defects, defect_complete = await _drain_filtered(
-                issues_api,
-                auth,
-                {
-                    "queue": queue,
-                    "type": ["bug"],
-                    "created": {"from": since, "to": today},
-                },
-                [
-                    "key",
-                    "status",
-                    "statusType",
-                    "priority",
-                    "resolution",
-                    "tags",
-                    "createdAt",
-                    "updatedAt",
-                ],
-                max_issues,
-                "qa_dashboard.defects",
-            )
-            closed = 0
-            open_now = 0
-            aging: Counter[str] = Counter()
-            escapes: list[str] = []
-            trend: Counter[str] = Counter()
-            for issue in defects:
-                st = _reference_key(getattr(issue, "statusType", None))
-                is_open = st not in _FINAL_STATUS_TYPE_KEYS
-                if is_open:
-                    open_now += 1
-                else:
-                    closed += 1
-                if isinstance(issue.created_at, datetime):
-                    trend[_bucket_label(issue.created_at, "week")] += 1
-                if is_open and isinstance(issue.created_at, datetime):
-                    aging[_age_bucket((now.date() - issue.created_at.date()).days)] += 1
-                if escape_marker:
-                    marker = escape_marker.casefold()
-                    resolution = (
-                        _reference_display(getattr(issue, "resolution", None)) or ""
-                    )
-                    if (
-                        marker
-                        in (" ".join(issue.tags or []) + " " + resolution).casefold()
-                    ):
-                        escapes.append(issue.key)
-            defects_block: dict[str, Any] = {
-                "created_total": len(defects),
-                "closed_total": closed,
-                "open_now": open_now,
-                "aging_buckets_days": dict(aging),
-                "trend_weekly": [
-                    {"period": bucket, "created": trend[bucket]}
-                    for bucket in sorted(trend)
-                ],
-                "coverage": {
-                    "complete": defect_complete,
-                    "window": {"from": since, "to": today},
-                },
-            }
+        defect_queue = release_queue or release_scope[0]
+        defects, defect_complete = await _drain_filtered(
+            issues_api,
+            auth,
+            {
+                "queue": defect_queue,
+                "type": ["bug"],
+                "created": {"from": since, "to": today},
+            },
+            [
+                "key",
+                "status",
+                "statusType",
+                "priority",
+                "resolution",
+                "tags",
+                "createdAt",
+                "updatedAt",
+            ],
+            max_issues,
+            "qa_dashboard.defects",
+        )
+        closed = 0
+        open_now = 0
+        aging: Counter[str] = Counter()
+        escapes: list[str] = []
+        trend: Counter[str] = Counter()
+        for issue in defects:
+            st = _reference_key(getattr(issue, "statusType", None))
+            is_open = st not in _FINAL_STATUS_TYPE_KEYS
+            if is_open:
+                open_now += 1
+            else:
+                closed += 1
+            if isinstance(issue.created_at, datetime):
+                trend[_bucket_label(issue.created_at, "week")] += 1
+            if is_open and isinstance(issue.created_at, datetime):
+                aging[_age_bucket((now.date() - issue.created_at.date()).days)] += 1
             if escape_marker:
-                defects_block["escapes"] = len(escapes)
-                defects_block["escapes_share"] = (
-                    round(len(escapes) / len(defects), 3) if defects else None
+                marker = escape_marker.casefold()
+                resolution = (
+                    _reference_display(getattr(issue, "resolution", None)) or ""
                 )
-                defects_block["escape_keys"] = escapes[:5]
+                if marker in (" ".join(issue.tags or []) + " " + resolution).casefold():
+                    escapes.append(issue.key)
+        defects_block: dict[str, Any] = {
+            "queue": defect_queue,
+            "created_total": len(defects),
+            "closed_total": closed,
+            "open_now": open_now,
+            "aging_buckets_days": dict(aging),
+            "trend_weekly": [
+                {"period": bucket, "created": trend[bucket]} for bucket in sorted(trend)
+            ],
+            "coverage": {
+                "complete": defect_complete,
+                "window": {"from": since, "to": today},
+            },
+        }
+        if escape_marker:
+            defects_block["escapes"] = len(escapes)
+            defects_block["escapes_share"] = (
+                round(len(escapes) / len(defects), 3) if defects else None
+            )
+            defects_block["escape_keys"] = escapes[:5]
 
+        discipline_per_queue: dict[str, dict[str, Any]] = {}
+        for queue in release_scope:
             discipline, discipline_complete = await _drain_filtered(
                 issues_api,
                 auth,
@@ -1136,11 +1148,8 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             no_estimation = 0
             no_spent = 0
             no_description = 0
-            in_testing = 0
-            stale_in_testing = 0
             stale_non_final = 0
             stale_cutoff = now - timedelta(days=30)
-            testing_stale_cutoff = now - timedelta(days=5)
             for issue in discipline:
                 if not issue.estimation:
                     no_estimation += 1
@@ -1149,22 +1158,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 if not (issue.description or "").strip():
                     no_description += 1
                 st = _reference_key(getattr(issue, "statusType", None))
-                is_final = st in _FINAL_STATUS_TYPE_KEYS
-                status_display = (
-                    (issue.status.display or "") if issue.status else ""
-                ).casefold()
-                if status_display in _TESTING_DISPLAYS:
-                    in_testing += 1
-                    updated = issue.updated_at
-                    if updated is not None:
-                        try:
-                            if updated.tzinfo is None:
-                                updated = updated.replace(tzinfo=timezone.utc)
-                            if updated < testing_stale_cutoff:
-                                stale_in_testing += 1
-                        except (ValueError, TypeError):
-                            pass
-                if not is_final:
+                if st not in _FINAL_STATUS_TYPE_KEYS:
                     updated = issue.updated_at
                     if updated is not None:
                         try:
@@ -1175,45 +1169,110 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                         except (ValueError, TypeError):
                             pass
             total = len(discipline)
-            per_queue[queue] = {
-                "defects": defects_block,
-                "workset": {
-                    "in_testing": in_testing,
-                    "stale_in_testing_5d": stale_in_testing,
-                    "testing_statuses": sorted(_TESTING_DISPLAYS),
+            discipline_per_queue[queue] = {
+                "issues_total": total,
+                "without_estimation": {
+                    "count": no_estimation,
+                    "share": round(no_estimation / total, 3) if total else None,
                 },
-                "discipline": {
-                    "issues_total": total,
-                    "without_estimation": {
-                        "count": no_estimation,
-                        "share": round(no_estimation / total, 3) if total else None,
-                    },
-                    "without_spent": {
-                        "count": no_spent,
-                        "share": round(no_spent / total, 3) if total else None,
-                    },
-                    "without_description": {
-                        "count": no_description,
-                        "share": round(no_description / total, 3) if total else None,
-                    },
-                    "stale_non_final_30d": stale_non_final,
-                    "coverage": {"complete": discipline_complete},
+                "without_spent": {
+                    "count": no_spent,
+                    "share": round(no_spent / total, 3) if total else None,
                 },
+                "without_description": {
+                    "count": no_description,
+                    "share": round(no_description / total, 3) if total else None,
+                },
+                "stale_non_final_30d": stale_non_final,
+                "coverage": {"complete": discipline_complete},
             }
+
+        # Org-wide QA workset: in-testing issues per queue, status-filtered
+        # server-side (cheap — only the testing-status rows are fetched).
+        workset_queues = queues or [
+            q.key
+            for q in await queues_api.queues_list(auth=auth)
+            if getattr(q, "key", None)
+        ]
+        statuses = await app.fields.get_statuses(auth=auth)
+        testing_keys: list[str] = []
+        for status in statuses:
+            display = " ".join(
+                (
+                    getattr(status, "name", None)
+                    or getattr(status, "display", None)
+                    or ""
+                ).split()
+            )
+            if display.casefold() in _TESTING_DISPLAYS:
+                key = getattr(status, "key", None)
+                if key:
+                    testing_keys.append(key)
+        workset_per_queue: dict[str, dict[str, Any]] = {}
+        total_in_testing = 0
+        total_stale = 0
+        workset_complete = True
+        stale_ws_cutoff = now - timedelta(days=5)
+        for queue in workset_queues:
+            if not testing_keys:
+                workset_per_queue[queue] = {
+                    "in_testing": 0,
+                    "stale_in_testing_5d": 0,
+                }
+                workset_complete = False
+                continue
+            ws_issues, ws_complete = await _drain_filtered(
+                issues_api,
+                auth,
+                {"queue": queue, "status": testing_keys},
+                ["key", "updatedAt"],
+                max_issues,
+                "qa_dashboard.workset",
+            )
+            workset_complete = workset_complete and ws_complete
+            stale = 0
+            for issue in ws_issues:
+                updated = issue.updated_at
+                if updated is not None:
+                    try:
+                        if updated.tzinfo is None:
+                            updated = updated.replace(tzinfo=timezone.utc)
+                        if updated < stale_ws_cutoff:
+                            stale += 1
+                    except (ValueError, TypeError):
+                        pass
+            workset_per_queue[queue] = {
+                "in_testing": len(ws_issues),
+                "stale_in_testing_5d": stale,
+            }
+            total_in_testing += len(ws_issues)
+            total_stale += stale
 
         response = {
             "status": "complete",
             "complete": True,
-            "queues": queues,
+            "workset_queues": workset_queues,
             "as_of": today,
             "release": release,
             "cycle": cycle,
-            "per_queue": per_queue,
+            "workset": {
+                "total_in_testing": total_in_testing,
+                "total_stale_in_testing_5d": total_stale,
+                "stale_days": 5,
+                "per_queue": workset_per_queue,
+                "coverage": {
+                    "complete": workset_complete,
+                    "testing_statuses_resolved": bool(testing_keys),
+                },
+            },
+            "defects": defects_block,
+            "discipline": discipline_per_queue,
             "reporting_contract": {
                 "aggregates_only_no_tables": True,
                 "cycle_and_returns_are_sampled": True,
                 "hours_not_days": True,
-                "release_block_skipped_when_no_versions": True,
+                "workset_scope_is_all_queues_by_default": True,
+                "release_anchor_is_most_loaded_unreleased_version": True,
             },
         }
         return response

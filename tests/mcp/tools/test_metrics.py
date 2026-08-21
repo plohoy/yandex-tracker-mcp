@@ -303,7 +303,10 @@ class TestSampling:
 
 class TestQaDashboard:
     async def test_dashboard_aggregates(
-        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_fields_protocol: AsyncMock,
     ) -> None:
         now = datetime(2026, 8, 21, tzinfo=timezone.utc)
         release = [
@@ -320,12 +323,24 @@ class TestQaDashboard:
         discipline = [
             _issue("TEST-1", estimation=None, spent=None, description=""),
             _issue("TEST-2", estimation="P1D", spent="P1D", status_type="done"),
-            _issue("TEST-4", status="Тестируется", status_type="open"),
         ]
+        ws_issues = [_issue("TEST-5", status="Тестируется")]
         cycle_issues = release
-        # call order: release drain, cycle drain, per-queue defects, discipline
+        # call order: release, cycle, defects, discipline, workset
         mock_issues_protocol.issues_find_filter = AsyncMock(
-            side_effect=[release, cycle_issues, defects, discipline]
+            side_effect=[
+                release,
+                cycle_issues,
+                defects,
+                discipline,
+                ws_issues,
+            ]
+        )
+        mock_fields_protocol.get_statuses = AsyncMock(
+            return_value=[
+                type("S", (), {"key": "qa_active", "name": "Тестируется"})(),
+                type("S", (), {"key": "open", "name": "Открыт"})(),
+            ]
         )
         changelog = [
             _status_event("2026-01-01T10:00:00+00:00", "В работе", "Тестируется"),
@@ -350,16 +365,17 @@ class TestQaDashboard:
         assert content["status"] == "complete"
         assert content["release"]["issues_total"] == 2
         assert content["release"]["open_critical"] == 1
-        block = content["per_queue"]["TEST"]
-        assert block["defects"]["created_total"] == 1
-        assert block["defects"]["escapes"] == 1
-        assert block["defects"]["escapes_share"] == 1.0
-        assert block["workset"]["in_testing"] == 1
-        assert block["discipline"]["without_estimation"]["count"] == 2
-        assert block["discipline"]["without_spent"]["count"] == 2
-        assert block["discipline"]["without_description"]["count"] == 1
+        assert content["defects"]["created_total"] == 1
+        assert content["defects"]["escapes"] == 1
+        assert content["defects"]["escapes_share"] == 1.0
+        assert content["workset"]["total_in_testing"] == 1
+        assert content["workset"]["per_queue"]["TEST"]["in_testing"] == 1
+        assert content["workset"]["coverage"]["testing_statuses_resolved"] is True
+        disc = content["discipline"]["TEST"]
+        assert disc["without_estimation"]["count"] == 1
+        assert disc["without_spent"]["count"] == 1
+        assert disc["without_description"]["count"] == 1
         assert content["cycle"]["issues_with_returns"] == 2
-        assert content["cycle"]["rework_total"] == 2
         assert content["cycle"]["return_rate_share"] == 1.0
 
     async def test_dashboard_without_version_skips_cycle(
@@ -367,12 +383,17 @@ class TestQaDashboard:
         client_session: ClientSession,
         mock_issues_protocol: AsyncMock,
         mock_queues_protocol: AsyncMock,
+        mock_fields_protocol: AsyncMock,
     ) -> None:
         mock_queues_protocol.queues_get_versions = AsyncMock(return_value=[])
         defects: list[Issue] = []
         discipline: list[Issue] = []
+        ws_issues: list[Issue] = []
         mock_issues_protocol.issues_find_filter = AsyncMock(
-            side_effect=[defects, discipline]
+            side_effect=[defects, discipline, ws_issues]
+        )
+        mock_fields_protocol.get_statuses = AsyncMock(
+            return_value=[type("S", (), {"key": "qa_active", "name": "Тестируется"})()]
         )
 
         result = await client_session.call_tool(
@@ -382,13 +403,15 @@ class TestQaDashboard:
         content = get_tool_result_content(result)
         assert content["release"] is None
         assert content["cycle"] is None
-        assert content["per_queue"]["TEST"]["defects"]["created_total"] == 0
+        assert content["defects"]["created_total"] == 0
+        assert content["workset"]["total_in_testing"] == 0
 
     async def test_dashboard_auto_resolves_latest_version(
         self,
         client_session: ClientSession,
         mock_issues_protocol: AsyncMock,
         mock_queues_protocol: AsyncMock,
+        mock_fields_protocol: AsyncMock,
     ) -> None:
         mock_queues_protocol.queues_get_versions = AsyncMock(
             return_value=[
@@ -399,17 +422,66 @@ class TestQaDashboard:
         release = [_issue("TEST-1", status_type="open")]
         defects: list[Issue] = []
         discipline: list[Issue] = []
-        # call order: version counts (R5, R3), release, cycle, defects, discipline
+        ws_issues: list[Issue] = []
+        # call order: version counts (R5, R3), release, cycle, defects,
+        # discipline, workset
         mock_issues_protocol.issues_find_filter = AsyncMock(
-            side_effect=[release, release, release, release, defects, discipline]
+            side_effect=[
+                release,
+                release,
+                release,
+                release,
+                defects,
+                discipline,
+                ws_issues,
+            ]
         )
         mock_issues_protocol.issue_get_status_changelog = AsyncMock(return_value=[])
+        mock_fields_protocol.get_statuses = AsyncMock(return_value=[])
 
         result = await client_session.call_tool(
             "issues_metrics_qa_dashboard", {"queues": ["TEST"]}
         )
 
         content = get_tool_result_content(result)
-        assert content["release"]["version_id"] == 5  # most loaded among latest
+        assert content["release"]["version_id"] == 5  # most loaded among active
         assert content["release"]["version_name"] == "R5"
         assert content["cycle"]["version_id"] == 5
+
+    async def test_dashboard_defaults_to_all_queues_workset(
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_queues_protocol: AsyncMock,
+        mock_fields_protocol: AsyncMock,
+    ) -> None:
+        from mcp_tracker.tracker.proto.types.queues import Queue
+
+        mock_queues_protocol.queues_get_versions = AsyncMock(return_value=[])
+        mock_queues_protocol.queues_list = AsyncMock(
+            return_value=[
+                Queue.model_construct(key="Q1"),
+                Queue.model_construct(key="Q2"),
+            ]
+        )
+        mock_fields_protocol.get_statuses = AsyncMock(
+            return_value=[type("S", (), {"key": "qa_active", "name": "Тестируется"})()]
+        )
+        defects: list[Issue] = []
+        discipline: list[Issue] = []
+        ws_q1 = [_issue("TEST-1", status="Тестируется")]
+        ws_q2: list[Issue] = []
+        # defects(YOURQUEUE), discipline(YOURQUEUE), discipline(TESTQUEUE),
+        # workset(Q1), workset(Q2)
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            side_effect=[defects, discipline, discipline, ws_q1, ws_q2]
+        )
+
+        result = await client_session.call_tool("issues_metrics_qa_dashboard", {})
+
+        content = get_tool_result_content(result)
+        assert content["workset_queues"] == ["Q1", "Q2"]
+        assert content["workset"]["total_in_testing"] == 1
+        assert content["workset"]["per_queue"]["Q1"]["in_testing"] == 1
+        assert content["workset"]["per_queue"]["Q2"]["in_testing"] == 0
+        assert set(content["discipline"]) == {"YOURQUEUE", "TESTQUEUE"}
