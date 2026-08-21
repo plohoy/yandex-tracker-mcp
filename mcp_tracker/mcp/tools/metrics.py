@@ -909,7 +909,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                         and not _version_value(version, "archived")
                     ]
                     best: tuple[Any, int] | None = None
-                    for candidate in (active or dated)[:5]:
+                    for candidate in (active or dated)[:10]:
                         candidate_issues, _ = await _drain_filtered(
                             issues_api,
                             auth,
