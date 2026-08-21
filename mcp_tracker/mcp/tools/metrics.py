@@ -391,24 +391,33 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     @mcp.tool(
         title="Defect Trend Metrics",
         description=(
-            "QA-lead defect metrics for issues created in a date range: "
-            "created/closed/open totals, weekly trend, open-bug aging buckets "
-            "(<30 / 30-90 / >90 days), and escapes (issues whose tags or "
-            "resolution contain escape_marker, e.g. 'прод' or 'продакшен'). "
-            "Use for 'тренд багов', 'старение багов', 'утечки в прод'. "
-            "Closed dates are approximated by updated_at (reporting_contract). "
-            "The trend table is capped (rows_capped in coverage)."
+            "QA-lead defect metrics, ORG-WIDE by default: for ALL queues "
+            "(or the queues given) issues of type bug created in a date "
+            "range — created/closed/open totals with a per-queue breakdown, "
+            "weekly trend, open-bug aging buckets (<30 / 30-90 / >90 days), "
+            "and escapes (issues whose tags or resolution contain "
+            "escape_marker, e.g. «прод»). Use for «тренд багов», «старение "
+            "багов», «утечки в прод» across the department. Closed dates are "
+            "approximated by updated_at (reporting_contract). The escape "
+            "table is capped (rows_capped in coverage)."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
     async def issues_metrics_defect_trend(
         ctx: Context[Any, AppContext],
-        queue: Annotated[str, Field(min_length=1, description="Queue key")],
+        queues: Annotated[
+            list[str] | None,
+            Field(
+                max_length=10,
+                description="Queue keys; default: ALL queues (org-wide)",
+            ),
+        ] = None,
         created_after: Annotated[
             str, Field(description="ISO date, inclusive start of the range")
-        ],
+        ] = ...,
         created_before: Annotated[
-            str | None, Field(description="ISO date, inclusive end; defaults to today")
+            str | None,
+            Field(description="ISO date, inclusive end; defaults to today"),
         ] = None,
         escape_marker: Annotated[
             str | None,
@@ -429,107 +438,126 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ] = "week",
         max_issues: Annotated[int, Field(ge=1, le=10_000)] = 2_000,
     ) -> dict[str, Any]:
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
-            raise ValueError("queue must be a Yandex Tracker queue key")
-        end = created_before or _now().date().isoformat()
-        issues_api = ctx.request_context.lifespan_context.issues
+        app = ctx.request_context.lifespan_context
+        issues_api = app.issues
         auth = get_yandex_auth(ctx)
-        issues, complete = await _drain_filtered(
-            issues_api,
-            auth,
-            {
-                "queue": queue,
-                "type": bug_type_keys,
-                "created": {"from": created_after, "to": end},
-            },
-            [
-                "key",
-                "summary",
-                "status",
-                "statusType",
-                "priority",
-                "resolution",
-                "tags",
-                "createdAt",
-                "updatedAt",
-            ],
-            max_issues,
-            "defect_trend",
-        )
-        closed = 0
+        scope = queues or [
+            q.key
+            for q in await app.queues.queues_list(auth=auth)
+            if getattr(q, "key", None)
+        ]
+        for queue in scope:
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
+                raise ValueError("queue must be a Yandex Tracker queue key")
+        end = created_before or _now().date().isoformat()
+        today = _now().date()
+
+        created_total = 0
+        closed_total = 0
         open_now = 0
-        created_by_bucket: Counter[str] = Counter()
-        closed_by_bucket: Counter[str] = Counter()
         aging: Counter[str] = Counter()
         escapes: list[dict[str, Any]] = []
-        today = _now().date()
-        for issue in issues:
-            st = _reference_key(getattr(issue, "statusType", None))
-            is_open = st not in _FINAL_STATUS_TYPE_KEYS
-            if is_open:
-                open_now += 1
-            else:
-                closed += 1
-            created_at = issue.created_at
-            if isinstance(created_at, datetime):
-                created_by_bucket[_bucket_label(created_at, group_by)] += 1
-            if not is_open and isinstance(issue.updated_at, datetime):
-                closed_by_bucket[_bucket_label(issue.updated_at, group_by)] += 1
-            if is_open and isinstance(created_at, datetime):
-                age_days = (today - created_at.date()).days
-                aging[_age_bucket(age_days)] += 1
-            if escape_marker:
-                marker = escape_marker.casefold()
-                resolution = (
-                    _reference_display(getattr(issue, "resolution", None))
-                    or _reference_key(getattr(issue, "resolution", None))
-                    or ""
-                )
-                haystack = " ".join(issue.tags or []) + " " + resolution
-                if marker in haystack.casefold():
-                    escapes.append(
-                        {
-                            "key": issue.key,
-                            "summary": issue.summary,
-                            "status": issue.status.display if issue.status else None,
-                            "priority": _reference_display(
-                                getattr(issue, "priority", None)
-                            ),
-                            "updated_at": (
-                                issue.updated_at.isoformat()
-                                if hasattr(issue.updated_at, "isoformat")
-                                else None
-                            ),
-                            "url": f"https://tracker.yandex.ru/{issue.key}",
-                        }
+        trend: Counter[str] = Counter()
+        per_queue: dict[str, dict[str, Any]] = {}
+        processed = 0
+        complete = True
+        for queue in scope:
+            issues, q_complete = await _drain_filtered(
+                issues_api,
+                auth,
+                {
+                    "queue": queue,
+                    "type": bug_type_keys,
+                    "created": {"from": created_after, "to": end},
+                },
+                [
+                    "key",
+                    "summary",
+                    "queue",
+                    "status",
+                    "statusType",
+                    "priority",
+                    "resolution",
+                    "tags",
+                    "createdAt",
+                    "updatedAt",
+                ],
+                max_issues,
+                "defect_trend",
+            )
+            complete = complete and q_complete
+            processed += len(issues)
+            q_created = 0
+            q_closed = 0
+            q_open = 0
+            for issue in issues:
+                st = _reference_key(getattr(issue, "statusType", None))
+                is_open = st not in _FINAL_STATUS_TYPE_KEYS
+                q_created += 1
+                if is_open:
+                    q_open += 1
+                else:
+                    q_closed += 1
+                if isinstance(issue.created_at, datetime):
+                    trend[_bucket_label(issue.created_at, group_by)] += 1
+                if is_open and isinstance(issue.created_at, datetime):
+                    aging[_age_bucket((today - issue.created_at.date()).days)] += 1
+                if escape_marker:
+                    marker = escape_marker.casefold()
+                    resolution = (
+                        _reference_display(getattr(issue, "resolution", None)) or ""
                     )
-        escapes.sort(key=lambda row: str(row["updated_at"] or ""), reverse=True)
-        all_buckets = sorted(set(created_by_bucket) | set(closed_by_bucket))
-        trend = [
-            {
-                "period": bucket,
-                "created": created_by_bucket.get(bucket, 0),
-                "closed": closed_by_bucket.get(bucket, 0),
+                    if (
+                        marker
+                        in (" ".join(issue.tags or []) + " " + resolution).casefold()
+                    ):
+                        escapes.append(
+                            {
+                                "key": issue.key,
+                                "summary": issue.summary,
+                                "queue": _reference_display(
+                                    getattr(issue, "queue", None)
+                                )
+                                or getattr(issue, "queue", None),
+                                "status": issue.status.display
+                                if issue.status
+                                else None,
+                                "priority": _reference_display(
+                                    getattr(issue, "priority", None)
+                                ),
+                                "updated_at": (
+                                    issue.updated_at.isoformat()
+                                    if hasattr(issue.updated_at, "isoformat")
+                                    else None
+                                ),
+                                "url": f"https://tracker.yandex.ru/{issue.key}",
+                            }
+                        )
+            created_total += q_created
+            closed_total += q_closed
+            open_now += q_open
+            per_queue[queue] = {
+                "created_total": q_created,
+                "closed_total": q_closed,
+                "open_now": q_open,
             }
-            for bucket in all_buckets
-        ]
-        total = len(issues)
+        escapes.sort(key=lambda row: str(row["updated_at"] or ""), reverse=True)
         response = {
             "status": "complete",
             "complete": True,
-            "queue": queue,
+            "queues": scope,
             "range": {"created_after": created_after, "created_before": end},
             "bug_type_keys": bug_type_keys,
-            "created_total": total,
-            "closed_total": closed,
+            "created_total": created_total,
+            "closed_total": closed_total,
             "open_now": open_now,
+            "per_queue": per_queue,
             "aging_buckets_days": dict(aging),
-            "escapes": len(escapes),
-            "escapes_share": round(len(escapes) / total, 3) if total else None,
-            "escape_table": escapes,
-            "trend": trend,
+            "trend": [
+                {"period": bucket, "created": trend[bucket]} for bucket in sorted(trend)
+            ],
             "coverage": {
-                "processed_issues": total,
+                "processed_issues": processed,
                 "complete": complete,
                 "closed_date_approximated_by_updated_at": True,
                 "escape_marker": escape_marker,
@@ -540,7 +568,14 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 "aging_buckets": ["<30d", "30-90d", ">90d"],
             },
         }
-        return _cap_rows_for_budget(response, "escape_table", "trend")
+        if escape_marker:
+            response["escapes"] = len(escapes)
+            response["escapes_share"] = (
+                round(len(escapes) / created_total, 3) if created_total else None
+            )
+            response["escape_table"] = escapes
+            return _cap_rows_for_budget(response, "escape_table")
+        return response
 
     @mcp.tool(
         title="Tracker Data Discipline Metrics",

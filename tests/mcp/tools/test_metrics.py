@@ -170,18 +170,54 @@ class TestDefectTrend:
 
         result = await client_session.call_tool(
             "issues_metrics_defect_trend",
-            {"queue": "TEST", "created_after": "2026-01-01", "escape_marker": "прод"},
+            {
+                "queues": ["TEST"],
+                "created_after": "2026-01-01",
+                "escape_marker": "прод",
+            },
         )
 
         content = get_tool_result_content(result)
         assert content["created_total"] == 3
         assert content["open_now"] == 2
         assert content["closed_total"] == 1
+        assert content["per_queue"]["TEST"]["created_total"] == 3
         assert content["aging_buckets_days"] == {"<30d": 1, "30-90d": 1}
         assert content["escapes"] == 1
         assert content["escape_table"][0]["key"] == "TEST-1"
         assert content["trend"][0]["created"] == 1  # one row per week
         assert sum(row["created"] for row in content["trend"]) == 3
+
+    async def test_trend_org_wide_aggregates(
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_queues_protocol: AsyncMock,
+    ) -> None:
+        from mcp_tracker.tracker.proto.types.queues import Queue
+
+        now = datetime(2026, 8, 21, tzinfo=timezone.utc)
+        mock_queues_protocol.queues_list = AsyncMock(
+            return_value=[
+                Queue.model_construct(key="Q1"),
+                Queue.model_construct(key="Q2"),
+            ]
+        )
+        q1 = [_issue("TEST-1", status_type="open", created_at=now)]
+        q2: list[Issue] = []
+        mock_issues_protocol.issues_find_filter = AsyncMock(side_effect=[q1, q2])
+
+        result = await client_session.call_tool(
+            "issues_metrics_defect_trend", {"created_after": "2026-01-01"}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["queues"] == ["Q1", "Q2"]
+        assert content["created_total"] == 1
+        assert content["per_queue"] == {
+            "Q1": {"created_total": 1, "closed_total": 0, "open_now": 1},
+            "Q2": {"created_total": 0, "closed_total": 0, "open_now": 0},
+        }
 
 
 class TestDataDiscipline:
