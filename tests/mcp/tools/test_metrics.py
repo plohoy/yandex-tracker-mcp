@@ -392,7 +392,7 @@ class TestQaDashboard:
     ) -> None:
         mock_queues_protocol.queues_get_versions = AsyncMock(
             return_value=[
-                {"id": 3, "name": "R3", "startDate": "2026-05-01"},
+                {"id": 3, "name": "R3", "startDate": "2026-05-01", "released": True},
                 {"id": 5, "name": "R5", "startDate": "2026-07-01"},
             ]
         )

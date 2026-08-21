@@ -899,11 +899,17 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                         ),
                         reverse=True,
                     )
-                    # Active release = the most loaded among the 3 latest
-                    # dated versions (a brand-new version with 2 tasks is not
-                    # the one being tested; the loaded one is).
+                    # Active release = the most loaded among the latest
+                    # un-released dated versions (a brand-new version with 2
+                    # tasks is not the one being tested; the loaded one is).
+                    active = [
+                        version
+                        for version in dated
+                        if not _version_value(version, "released")
+                        and not _version_value(version, "archived")
+                    ]
                     best: tuple[Any, int] | None = None
-                    for candidate in dated[:3]:
+                    for candidate in (active or dated)[:5]:
                         candidate_issues, _ = await _drain_filtered(
                             issues_api,
                             auth,
