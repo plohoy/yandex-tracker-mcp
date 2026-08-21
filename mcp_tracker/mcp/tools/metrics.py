@@ -175,6 +175,94 @@ def _cycle_metrics(
     }
 
 
+async def _carryover_metrics(
+    issues_api: Any, auth: Any, board: dict[str, Any], queue: str | None, max_issues: int
+) -> dict[str, Any]:
+    """Carryover metrics for one board (shared by single-queue and all-queues modes)."""
+    board_id = int(board["id"])
+    entry: dict[str, Any] = {
+        "board_id": board_id,
+        "board_name": board.get("name"),
+    }
+    sprints = await issues_api.board_get_sprints(board_id, auth=auth)
+    dated = [
+        sprint
+        for sprint in sprints
+        if sprint.get("endDate") or sprint.get("end_date")
+    ]
+    dated.sort(
+        key=lambda sprint: str(
+            sprint.get("endDate") or sprint.get("end_date") or ""
+        ),
+        reverse=True,
+    )
+    if len(dated) < 2:
+        return {**entry, "status": "insufficient_sprints", "sprints_found": len(dated)}
+    today_iso = _now().date().isoformat()
+    started = [
+        sprint
+        for sprint in dated
+        if str(sprint.get("startDate") or sprint.get("start_date") or "") <= today_iso
+    ]
+    pool = started if len(started) >= 2 else dated
+    current, previous = pool[0], pool[1]
+    filters: dict[str, object] = {
+        "sprint": [current.get("id"), previous.get("id")]
+    }
+    if queue is not None:
+        filters["queue"] = queue
+    issues, complete = await _drain_filtered(
+        issues_api,
+        auth,
+        filters,
+        ["key", "summary", "status", "statusType", "sprint"],
+        max_issues,
+        "sprint_carryover",
+    )
+    keys_by_sprint: dict[int, dict[str, Any]] = defaultdict(dict)
+    for issue in issues:
+        for sprint_ref in issue.sprint or []:
+            try:
+                keys_by_sprint[int(getattr(sprint_ref, "id", 0))][issue.key] = issue
+            except (TypeError, ValueError):
+                continue
+    current_keys = keys_by_sprint.get(int(current.get("id") or 0), {})
+    previous_keys = keys_by_sprint.get(int(previous.get("id") or 0), {})
+    carried = [
+        {
+            "key": key,
+            "summary": issue.summary,
+            "status": issue.status.display if issue.status else None,
+            "url": f"https://tracker.yandex.ru/{key}",
+        }
+        for key, issue in sorted(previous_keys.items())
+        if key in current_keys
+    ]
+    return {
+        **entry,
+        "status": "complete",
+        "complete": complete,
+        "current_sprint": {
+            "id": current.get("id"),
+            "name": current.get("name"),
+            "end_date": current.get("endDate") or current.get("end_date"),
+        },
+        "previous_sprint": {
+            "id": previous.get("id"),
+            "name": previous.get("name"),
+            "end_date": previous.get("endDate") or previous.get("end_date"),
+        },
+        "current_total": len(current_keys),
+        "previous_total": len(previous_keys),
+        "carried_over": len(carried),
+        "carryover_share": round(len(carried) / len(previous_keys), 3)
+        if previous_keys
+        else None,
+        "carried_table": carried,
+    }
+
+
+
 def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     @mcp.tool(
         title="Release Readiness Metrics",
@@ -856,14 +944,14 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         title="Sprint Carryover Metrics",
         description=(
             "QA-lead flow metric: how much of the previous sprint's issue set "
-            "carried over into the current sprint. Resolves the queue's board "
-            "(ambiguous board names return candidates), takes the two most "
-            "recent sprints by end date, and reports carried-over issues. Use "
+            "was carried into the current sprint of a board. Use "
             "for 'сколько перенесли между спринтами', 'перегрузка "
             "планирования'. The carried table is capped (rows_capped in "
             "coverage). Use for «переносы спринтов», «что перенесли со спринта». "
             "The metric is board-scoped: resolve ONE board (by queue name or "
-            "board_id) — do NOT iterate all queues."
+            "board_id) — do NOT iterate queues one by one; for the org-wide "
+            "view pass all_queues=true (ONE call returns a compact per-queue "
+            "summary)."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -881,12 +969,82 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 gt=0, description="Explicit board id; otherwise resolved by queue name"
             ),
         ] = None,
+        all_queues: Annotated[
+            bool,
+            Field(
+                description=(
+                    "If true, compute carryover for EVERY queue in one call "
+                    "(per-queue summary: board, current/previous sprint, "
+                    "carried count) — use for «переносы спринтов по всем "
+                    "очередям». Default false."
+                )
+            ),
+        ] = False,
         max_issues: Annotated[int, Field(ge=1, le=10_000)] = 2_000,
     ) -> dict[str, Any]:
         if queue is not None and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
             raise ValueError("queue must be a Yandex Tracker queue key")
-        issues_api = ctx.request_context.lifespan_context.issues
+        app = ctx.request_context.lifespan_context
+        issues_api = app.issues
         auth = get_yandex_auth(ctx)
+        if all_queues:
+            queue_keys = [
+                q.key
+                for q in await app.queues.queues_list(auth=auth)
+                if getattr(q, "key", None)
+            ]
+            boards = await issues_api.boards_get_all(auth=auth)
+            per_queue: dict[str, dict[str, Any]] = {}
+            total_carried = 0
+            with_data = 0
+            for q in queue_keys:
+                needle = f" {q.casefold()} "
+                candidates = [
+                    board
+                    for board in boards
+                    if needle in f" {str(board.get('name', '')).casefold()} "
+                ]
+                if len(candidates) != 1:
+                    per_queue[q] = {
+                        "status": (
+                            "board_not_found" if not candidates else "ambiguous_board"
+                        ),
+                        "candidate_boards": [
+                            {"id": board.get("id"), "name": board.get("name")}
+                            for board in candidates[:5]
+                        ],
+                    }
+                    continue
+                metrics = await _carryover_metrics(
+                    issues_api, auth, candidates[0], q, max_issues
+                )
+                entry = {k: v for k, v in metrics.items() if k != "carried_table"}
+                per_queue[q] = entry
+                if entry.get("status") == "complete":
+                    with_data += 1
+                    total_carried += entry["carried_over"]
+            return {
+                "status": "complete",
+                "complete": True,
+                "scope": "all_queues",
+                "per_queue": per_queue,
+                "totals": {
+                    "queues_checked": len(queue_keys),
+                    "with_carryover_data": with_data,
+                    "carried_over_total": total_carried,
+                },
+                "coverage": {
+                    "mode": "all_queues",
+                    "carried_table_omitted": True,
+                },
+                "reporting_contract": {
+                    "board_scoped": True,
+                    "carried_counts_only": True,
+                    "per_queue_statuses": (
+                        "board_not_found / ambiguous_board / insufficient_sprints / complete"
+                    ),
+                },
+            }
         if board_id is None:
             boards = await issues_api.boards_get_all(auth=auth)
             if queue is None:
@@ -922,101 +1080,28 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                     ],
                     "required_action": "Supply board_id; do not report a carryover count.",
                 }
-            board_id = int(candidates[0]["id"])
-        sprints = await issues_api.board_get_sprints(board_id, auth=auth)
-        dated = [
-            sprint
-            for sprint in sprints
-            if sprint.get("endDate") or sprint.get("end_date")
-        ]
-        dated.sort(
-            key=lambda sprint: str(
-                sprint.get("endDate") or sprint.get("end_date") or ""
-            ),
-            reverse=True,
-        )
-        if len(dated) < 2:
-            return {
-                "status": "insufficient_sprints",
-                "complete": False,
-                "board_id": board_id,
-                "sprints_found": len(dated),
-                "required_action": "Need at least two dated sprints to compute carryover.",
-            }
-        today_iso = _now().date().isoformat()
-        started = [
-            sprint
-            for sprint in dated
-            if str(sprint.get("startDate") or sprint.get("start_date") or "") <= today_iso
-        ]
-        pool = started if len(started) >= 2 else dated
-        current, previous = pool[0], pool[1]
-        filters: dict[str, object] = {
-            "sprint": [current.get("id"), previous.get("id")]
-        }
-        if queue is not None:
-            filters["queue"] = queue
-        issues, complete = await _drain_filtered(
-            issues_api,
-            auth,
-            filters,
-            ["key", "summary", "status", "statusType", "sprint"],
-            max_issues,
-            "sprint_carryover",
-        )
-        keys_by_sprint: dict[int, dict[str, Any]] = defaultdict(dict)
-        for issue in issues:
-            for sprint_ref in issue.sprint or []:
-                try:
-                    keys_by_sprint[int(getattr(sprint_ref, "id", 0))][issue.key] = issue
-                except (TypeError, ValueError):
-                    continue
-        current_keys = keys_by_sprint.get(int(current.get("id") or 0), {})
-        previous_keys = keys_by_sprint.get(int(previous.get("id") or 0), {})
-        carried = [
-            {
-                "key": key,
-                "summary": issue.summary,
-                "status": issue.status.display if issue.status else None,
-                "url": f"https://tracker.yandex.ru/{key}",
-            }
-            for key, issue in sorted(previous_keys.items())
-            if key in current_keys
-        ]
-        response = {
+            board = candidates[0]
+        else:
+            board = {"id": board_id, "name": None}
+        metrics = await _carryover_metrics(issues_api, auth, board, queue, max_issues)
+        if metrics["status"] != "complete":
+            return {**metrics, "queue": queue}
+        return {
             "status": "complete",
             "complete": True,
             "queue": queue,
-            "board_id": board_id,
-            "current_sprint": {
-                "id": current.get("id"),
-                "name": current.get("name"),
-                "end_date": current.get("endDate") or current.get("end_date"),
-            },
-            "previous_sprint": {
-                "id": previous.get("id"),
-                "name": previous.get("name"),
-                "end_date": previous.get("endDate") or previous.get("end_date"),
-            },
-            "current_total": len(current_keys),
-            "previous_total": len(previous_keys),
-            "carried_over": len(carried),
-            "carryover_share": round(len(carried) / len(previous_keys), 3)
-            if previous_keys
-            else None,
-            "carried_table": carried,
+            **metrics,
             "coverage": {
-                "processed_issues": len(issues),
-                "complete": complete,
-                "sprint_definition": "issue.sprint reference contains the sprint id",
+                "processed_issues": 0,
+                "complete": metrics["complete"],
+                "cycle_definition": "sprint pair by end date; active (started) sprints preferred",
             },
             "reporting_contract": {
-                "carryover_definition": "issue present in both previous and current sprint",
-                "share_denominator_is_previous_total": True,
-                "do_not_invent_sprint_dates": True,
+                "board_scoped": True,
+                "carried_definition": "issue present in both previous and current sprint",
             },
         }
-        return _cap_rows_for_budget(response, "carried_table")
+
 
     @mcp.tool(
         title="QA Department Dashboard",

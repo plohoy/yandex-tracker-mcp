@@ -649,3 +649,54 @@ class TestCreatedOpenAggregate:
         assert content["top_creators"][0]["total"] == 2
         assert content["top_creators"][1]["creator"] == "Пётр"
         assert content["top_creators"][1]["total"] == 1
+
+
+class TestSprintCarryoverAllQueues:
+    async def test_all_queues_summary(
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_queues_protocol: AsyncMock,
+    ) -> None:
+        from mcp_tracker.tracker.proto.types.queues import Queue
+
+        mock_queues_protocol.queues_list = AsyncMock(
+            return_value=[
+                Queue.model_construct(key="Q1"),
+                Queue.model_construct(key="Q2"),
+            ]
+        )
+        mock_issues_protocol.boards_get_all = AsyncMock(
+            return_value=[
+                {"id": 1, "name": "Q1 BOARD"},
+                {"id": 2, "name": "OTHER"},
+            ]
+        )
+        mock_issues_protocol.board_get_sprints = AsyncMock(
+            return_value=[
+                {
+                    "id": 11,
+                    "name": "S1",
+                    "startDate": "2026-07-01",
+                    "endDate": "2026-07-14",
+                },
+                {
+                    "id": 12,
+                    "name": "S2",
+                    "startDate": "2026-07-15",
+                    "endDate": "2026-07-28",
+                },
+            ]
+        )
+        mock_issues_protocol.issues_find_filter = AsyncMock(return_value=[])
+
+        result = await client_session.call_tool(
+            "issues_metrics_sprint_carryover", {"all_queues": True}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["scope"] == "all_queues"
+        assert content["totals"]["queues_checked"] == 2
+        assert content["per_queue"]["Q1"]["status"] == "complete"
+        assert content["per_queue"]["Q2"]["status"] == "board_not_found"
+        assert content["per_queue"]["Q1"]["carried_over"] == 0
