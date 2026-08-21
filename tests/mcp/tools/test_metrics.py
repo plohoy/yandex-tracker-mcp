@@ -323,8 +323,9 @@ class TestQaDashboard:
             _issue("TEST-4", status="Тестируется", status_type="open"),
         ]
         cycle_issues = release
+        # call order: release drain, cycle drain, per-queue defects, discipline
         mock_issues_protocol.issues_find_filter = AsyncMock(
-            side_effect=[release, defects, discipline, cycle_issues]
+            side_effect=[release, cycle_issues, defects, discipline]
         )
         changelog = [
             _status_event("2026-01-01T10:00:00+00:00", "В работе", "Тестируется"),
@@ -338,7 +339,7 @@ class TestQaDashboard:
         result = await client_session.call_tool(
             "issues_metrics_qa_dashboard",
             {
-                "queue": "TEST",
+                "queues": ["TEST"],
                 "version_id": 1,
                 "created_after": "2026-08-01",
                 "escape_marker": "прод",
@@ -349,13 +350,14 @@ class TestQaDashboard:
         assert content["status"] == "complete"
         assert content["release"]["issues_total"] == 2
         assert content["release"]["open_critical"] == 1
-        assert content["defects"]["created_total"] == 1
-        assert content["defects"]["escapes"] == 1
-        assert content["defects"]["escapes_share"] == 1.0
-        assert content["workset"]["in_testing"] == 1
-        assert content["discipline"]["without_estimation"]["count"] == 2
-        assert content["discipline"]["without_spent"]["count"] == 2
-        assert content["discipline"]["without_description"]["count"] == 1
+        block = content["per_queue"]["TEST"]
+        assert block["defects"]["created_total"] == 1
+        assert block["defects"]["escapes"] == 1
+        assert block["defects"]["escapes_share"] == 1.0
+        assert block["workset"]["in_testing"] == 1
+        assert block["discipline"]["without_estimation"]["count"] == 2
+        assert block["discipline"]["without_spent"]["count"] == 2
+        assert block["discipline"]["without_description"]["count"] == 1
         assert content["cycle"]["issues_with_returns"] == 2
         assert content["cycle"]["rework_total"] == 2
         assert content["cycle"]["return_rate_share"] == 1.0
@@ -363,6 +365,7 @@ class TestQaDashboard:
     async def test_dashboard_without_version_skips_cycle(
         self, client_session: ClientSession, mock_issues_protocol: AsyncMock
     ) -> None:
+        mock_issues_protocol.queue_get_versions = AsyncMock(return_value=[])
         defects: list[Issue] = []
         discipline: list[Issue] = []
         mock_issues_protocol.issues_find_filter = AsyncMock(
@@ -370,10 +373,36 @@ class TestQaDashboard:
         )
 
         result = await client_session.call_tool(
-            "issues_metrics_qa_dashboard", {"queue": "TEST"}
+            "issues_metrics_qa_dashboard", {"queues": ["TEST"]}
         )
 
         content = get_tool_result_content(result)
         assert content["release"] is None
         assert content["cycle"] is None
-        assert content["defects"]["created_total"] == 0
+        assert content["per_queue"]["TEST"]["defects"]["created_total"] == 0
+
+    async def test_dashboard_auto_resolves_latest_version(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        mock_issues_protocol.queue_get_versions = AsyncMock(
+            return_value=[
+                {"id": 3, "name": "R3", "startDate": "2026-05-01"},
+                {"id": 5, "name": "R5", "startDate": "2026-07-01"},
+            ]
+        )
+        release = [_issue("TEST-1", status_type="open")]
+        defects: list[Issue] = []
+        discipline: list[Issue] = []
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            side_effect=[release, release, defects, discipline]
+        )
+        mock_issues_protocol.issue_get_status_changelog = AsyncMock(return_value=[])
+
+        result = await client_session.call_tool(
+            "issues_metrics_qa_dashboard", {"queues": ["TEST"]}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["release"]["version_id"] == 5  # latest by startDate
+        assert content["release"]["version_name"] == "R5"
+        assert content["cycle"]["version_id"] == 5
