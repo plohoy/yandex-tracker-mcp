@@ -363,9 +363,12 @@ class TestQaDashboard:
         assert content["cycle"]["return_rate_share"] == 1.0
 
     async def test_dashboard_without_version_skips_cycle(
-        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_queues_protocol: AsyncMock,
     ) -> None:
-        mock_issues_protocol.queue_get_versions = AsyncMock(return_value=[])
+        mock_queues_protocol.queues_get_versions = AsyncMock(return_value=[])
         defects: list[Issue] = []
         discipline: list[Issue] = []
         mock_issues_protocol.issues_find_filter = AsyncMock(
@@ -382,9 +385,12 @@ class TestQaDashboard:
         assert content["per_queue"]["TEST"]["defects"]["created_total"] == 0
 
     async def test_dashboard_auto_resolves_latest_version(
-        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_queues_protocol: AsyncMock,
     ) -> None:
-        mock_issues_protocol.queue_get_versions = AsyncMock(
+        mock_queues_protocol.queues_get_versions = AsyncMock(
             return_value=[
                 {"id": 3, "name": "R3", "startDate": "2026-05-01"},
                 {"id": 5, "name": "R5", "startDate": "2026-07-01"},
