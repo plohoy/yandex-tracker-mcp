@@ -705,7 +705,7 @@ class TestSprintCarryoverAllQueues:
 
 
 class TestDisciplineTable:
-    def test_aligned_monospace_block(self) -> None:
+    def test_compact_aligned_monospace_block(self) -> None:
         from mcp_tracker.mcp.tools.metrics import _discipline_table
 
         table = _discipline_table(
@@ -718,15 +718,49 @@ class TestDisciplineTable:
                     "stale_non_final": 12,
                 }
             },
-            "Залежались >30д (не финальные)",
+            "Зависшие 30+ дн",
             "stale_non_final",
         )
         lines = table.splitlines()
         assert lines[0] == "```"
         assert lines[-1] == "```"
-        # aligned monospace, no markdown pipes
+        # compact format: short headers, whole percents, queue with total
         assert "|" not in table
-        assert "76.2% (76)" in table
+        assert "Без факт. времени" in table
+        assert "76%" in table
+        assert "Q1 (100)" in table
         # every row on its own line (the bug: one collapsed line)
         assert sum(1 for line in lines if line.strip().startswith("Q1")) == 1
         assert sum(1 for line in lines if line.strip().startswith("Очередь")) == 1
+
+    def test_capped_footnote(self) -> None:
+        from mcp_tracker.mcp.tools.metrics import _discipline_table
+
+        table = _discipline_table(
+            {
+                "Q1": {
+                    "issues_total": 2000,
+                    "without_estimation": {"count": 1, "share": 0.5},
+                    "without_spent": {"count": 1, "share": 0.5},
+                    "without_description": {"count": 1, "share": 0.5},
+                    "stale_non_final": 3,
+                }
+            },
+            "Зависшие 30+ дн",
+            "stale_non_final",
+        )
+        assert "Q1 (2000)¹" in table
+        assert "¹ выборка неполная" in table
+
+    def test_workset_table_nonempty_rows_only(self) -> None:
+        from mcp_tracker.mcp.tools.metrics import _workset_table
+
+        table = _workset_table(
+            {
+                "Q1": {"in_testing": 5, "stale_in_testing_5d": 2},
+                "Q2": {"in_testing": 0, "stale_in_testing_5d": 0},
+            }
+        )
+        assert "Q1" in table and "5" in table
+        assert "Q2" not in table
+        assert "|" not in table

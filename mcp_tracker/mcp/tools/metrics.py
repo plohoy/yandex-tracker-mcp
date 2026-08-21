@@ -58,36 +58,68 @@ def _default_release_queues() -> list[str] | None:
 def _discipline_table(
     per_queue: dict[str, dict[str, Any]], stale_label: str, stale_key: str
 ) -> str:
-    """Pre-built discipline table as an aligned monospace block (no markdown pipes:
-    pipes do not render on Telegram and LLM re-generation collapses pipe tables
-    into one line). The model copies the block verbatim."""
+    """Pre-built discipline table in the compact format the user is used to
+    (short headers, whole percents, queue with total, ¹ footnote for capped
+    samples) as an aligned monospace block. No markdown pipes (they do not
+    render on Telegram) and the model copies the block verbatim."""
 
-    def cell(metric: dict[str, Any]) -> str:
+    def pct(metric: dict[str, Any]) -> str:
         share = metric.get("share")
-        count = metric.get("count")
         if share is None:
             return "—"
-        return f"{share * 100:.1f}% ({count})"
+        return f"{round(share * 100)}%"
 
     headers = [
         "Очередь",
-        "Всего",
         "Без оценки",
-        "Без затраченного времени",
+        "Без факт. времени",
         "Без описания",
         stale_label,
     ]
-    rows = [
-        [
-            queue,
-            str(d.get("issues_total", "?")),
-            cell(d.get("without_estimation", {})),
-            cell(d.get("without_spent", {})),
-            cell(d.get("without_description", {})),
-            str(d.get(stale_key, "?")),
-        ]
-        for queue, d in per_queue.items()
+    rows: list[list[str]] = []
+    capped: set[str] = set()
+    for queue, d in per_queue.items():
+        total = d.get("issues_total", 0)
+        if total >= 2000:
+            capped.add(queue)
+        rows.append(
+            [
+                f"{queue} ({total})" + ("¹" if queue in capped else ""),
+                pct(d.get("without_estimation", {})),
+                pct(d.get("without_spent", {})),
+                pct(d.get("without_description", {})),
+                str(d.get(stale_key, "?")),
+            ]
+        )
+    if not rows:
+        return ""
+    widths = [
+        max(len(headers[i]), *(len(r[i]) for r in rows)) for i in range(len(headers))
     ]
+
+    def fmt(row: list[str]) -> str:
+        return "  ".join(v.ljust(widths[i]) for i, v in enumerate(row)).rstrip()
+
+    lines = [fmt(headers), *map(fmt, rows)]
+    if capped:
+        lines.append("¹ выборка неполная (потолок выборки).")
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
+def _workset_table(per_queue: dict[str, dict[str, Any]]) -> str:
+    """Pre-built workset table (non-empty queues only) as an aligned monospace
+    block — same compact look the user already had."""
+
+    headers = ["Очередь", "В тесте", "Зависшие (5+ дн)"]
+    rows: list[list[str]] = []
+    for queue, d in per_queue.items():
+        in_testing = d.get("in_testing", 0)
+        stale = d.get("stale_in_testing_5d", 0)
+        if not in_testing and not stale:
+            continue
+        rows.append([queue, str(in_testing), str(stale)])
+    if not rows:
+        return ""
     widths = [
         max(len(headers[i]), *(len(r[i]) for r in rows)) for i in range(len(headers))
     ]
@@ -825,9 +857,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "'без описания', 'зависшие задачи'. The stale table is capped "
             "(rows_capped in coverage). The per_queue breakdown covers ALL "
             "queues and always fits inline — never assume it was truncated; "
-            "report every queue row. Copy the pre-built aligned monospace "
-            "table (key 'table') VERBATIM into the answer — never rebuild "
-            "or convert it (markdown pipes do not render on Telegram)."
+            "report every queue row. Copy the pre-built compact tables (keys "
+            "'table') VERBATIM into the answer — never rebuild or convert "
+            "them (markdown pipes do not render on Telegram)."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -978,7 +1010,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "per_queue": per_queue,
             "stale_table": stale,
             "table": _discipline_table(
-                per_queue, f"Залежались >{stale_days}д (не финальные)", "stale_non_final"
+                per_queue, f"Зависшие {stale_days}+ дн", "stale_non_final"
             ),
             "coverage": {
                 "processed_issues": grand_total,
@@ -1189,9 +1221,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "only — no per-task tables; point the user to the specific "
             "metric tools for detail. The response fits the inline budget — "
             "never assume truncation unless coverage reports rows_capped=true. "
-            "Copy the pre-built aligned monospace discipline table (key "
+            "Copy the pre-built compact tables (keys 'workset_table' and "
             "'discipline_table') VERBATIM into the answer — never rebuild "
-            "or convert it (markdown pipes do not render on Telegram)."
+            "or convert them (markdown pipes do not render on Telegram)."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -1674,9 +1706,10 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "discipline": discipline_per_queue,
             "discipline_table": _discipline_table(
                 discipline_per_queue,
-                "Залежались >30д (не финальные)",
+                "Зависшие 30+ дн",
                 "stale_non_final_30d",
             ),
+            "workset_table": _workset_table(workset_per_queue),
             "reporting_contract": {
                 "aggregates_only_no_tables": True,
                 "cycle_and_returns_are_sampled": True,
