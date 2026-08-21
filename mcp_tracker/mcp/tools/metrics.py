@@ -899,11 +899,27 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                         ),
                         reverse=True,
                     )
+                    # Active release = the most loaded among the 3 latest
+                    # dated versions (a brand-new version with 2 tasks is not
+                    # the one being tested; the loaded one is).
+                    best: tuple[Any, int] | None = None
+                    for candidate in dated[:3]:
+                        candidate_issues, _ = await _drain_filtered(
+                            issues_api,
+                            auth,
+                            {"queue": queue, "fixVersions": int(_version_value(candidate, "id"))},
+                            ["key"],
+                            max_issues,
+                            "qa_dashboard.version_count",
+                        )
+                        if best is None or len(candidate_issues) > best[1]:
+                            best = (candidate, len(candidate_issues))
+                    assert best is not None
                     release_queue, release_version = (
                         queue,
-                        int(_version_value(dated[0], "id")),
+                        int(_version_value(best[0], "id")),
                     )
-                    release_name = _version_value(dated[0], "name")
+                    release_name = _version_value(best[0], "name")
                     break
 
         release: dict[str, Any] | None = None

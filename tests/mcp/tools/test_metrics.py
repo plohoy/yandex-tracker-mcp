@@ -399,8 +399,9 @@ class TestQaDashboard:
         release = [_issue("TEST-1", status_type="open")]
         defects: list[Issue] = []
         discipline: list[Issue] = []
+        # call order: version counts (R5, R3), release, cycle, defects, discipline
         mock_issues_protocol.issues_find_filter = AsyncMock(
-            side_effect=[release, release, defects, discipline]
+            side_effect=[release, release, release, release, defects, discipline]
         )
         mock_issues_protocol.issue_get_status_changelog = AsyncMock(return_value=[])
 
@@ -409,6 +410,6 @@ class TestQaDashboard:
         )
 
         content = get_tool_result_content(result)
-        assert content["release"]["version_id"] == 5  # latest by startDate
+        assert content["release"]["version_id"] == 5  # most loaded among latest
         assert content["release"]["version_name"] == "R5"
         assert content["cycle"]["version_id"] == 5
