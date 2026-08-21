@@ -2036,7 +2036,8 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         description=(
             "Count and list issues for a queue, status, and the active sprint of its "
             "board. Use ONLY when the user explicitly says current sprint, for questions like 'how many tasks are testing in the "
-            "current sprint'. Do not repeatedly call issues_find or invent YQL. "
+            "current sprint'. NOT for «переносы спринтов»/carryover — that is issues_metrics_sprint_carryover. "
+            "Do not repeatedly call issues_find or invent YQL. "
             "An empty result is authoritative only when this tool reports complete=true."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),

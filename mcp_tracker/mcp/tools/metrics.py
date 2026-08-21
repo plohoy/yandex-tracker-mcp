@@ -861,7 +861,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "recent sprints by end date, and reports carried-over issues. Use "
             "for 'сколько перенесли между спринтами', 'перегрузка "
             "планирования'. The carried table is capped (rows_capped in "
-            "coverage). Use for «переносы спринтов», «что перенесли со спринта»."
+            "coverage). Use for «переносы спринтов», «что перенесли со спринта». "
+            "The metric is board-scoped: resolve ONE board (by queue name or "
+            "board_id) — do NOT iterate all queues."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -941,11 +943,23 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 "sprints_found": len(dated),
                 "required_action": "Need at least two dated sprints to compute carryover.",
             }
-        current, previous = dated[0], dated[1]
+        today_iso = _now().date().isoformat()
+        started = [
+            sprint
+            for sprint in dated
+            if str(sprint.get("startDate") or sprint.get("start_date") or "") <= today_iso
+        ]
+        pool = started if len(started) >= 2 else dated
+        current, previous = pool[0], pool[1]
+        filters: dict[str, object] = {
+            "sprint": [current.get("id"), previous.get("id")]
+        }
+        if queue is not None:
+            filters["queue"] = queue
         issues, complete = await _drain_filtered(
             issues_api,
             auth,
-            {"queue": queue},
+            filters,
             ["key", "summary", "status", "statusType", "sprint"],
             max_issues,
             "sprint_carryover",
