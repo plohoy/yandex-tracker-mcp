@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import json
 import logging
 import random
 import time
@@ -9,7 +10,7 @@ from typing import Any, Literal
 
 import jwt
 import yandexcloud
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientResponseError, ClientSession, ClientTimeout
 from pydantic import BaseModel, RootModel
 from yandex.cloud.iam.v1.iam_token_service_pb2 import CreateIamTokenRequest
 from yandex.cloud.iam.v1.iam_token_service_pb2_grpc import IamTokenServiceStub
@@ -202,6 +203,44 @@ class TrackerClient(QueuesProtocol, IssueProtocol, GlobalDataProtocol, UsersProt
             base_url=base_url,
             timeout=ClientTimeout(total=timeout),
         )
+
+    _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+    async def _request_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json_body: dict[str, object] | None = None,
+        params: dict[str, object] | None = None,
+        retries: int = 2,
+    ) -> tuple[int, bytes, Any]:
+        """POST/GET with a small retry budget for transient Tracker limits
+        (429/5xx). Sleeps the Retry-After header or a short backoff; keeps
+        the caller's response shape (status, body, parsed Link headers)."""
+        for attempt in range(retries + 1):
+            async with getattr(self._session, method)(
+                url,
+                headers=headers,
+                json=json_body,
+                params=params,
+            ) as response:
+                body = await response.read()
+                if response.status in self._RETRYABLE_STATUSES and attempt < retries:
+                    retry_after = response.headers.get("Retry-After")
+                    delay = float(retry_after) if retry_after else 1.5 * (attempt + 1)
+                    await asyncio.sleep(delay)
+                    continue
+                if response.status >= 400:
+                    raise ClientResponseError(
+                        request_info=response.request_info,
+                        history=response.history,
+                        status=response.status,
+                        message=response.reason or "",
+                    )
+                return response.status, body, response.links
+        raise RuntimeError("unreachable")  # pragma: no cover
 
     async def prepare(self):
         if self._service_account_store:
@@ -610,14 +649,14 @@ class TrackerClient(QueuesProtocol, IssueProtocol, GlobalDataProtocol, UsersProt
         params: dict[str, object] = {"perPage": per_page, "page": page}
         if fields:
             params["fields"] = ",".join(fields)
-        async with self._session.post(
+        _status, body, _links = await self._request_retry(
+            "post",
             "v3/issues/_search",
             headers=await self._build_headers(auth),
-            json={"filter": filters},
+            json_body={"filter": filters},
             params=params,
-        ) as response:
-            response.raise_for_status()
-            return IssueList.model_validate_json(await response.read()).root
+        )
+        return IssueList.model_validate_json(body).root
 
     async def issue_get_status_changelog(
         self,
@@ -630,19 +669,19 @@ class TrackerClient(QueuesProtocol, IssueProtocol, GlobalDataProtocol, UsersProt
         params: dict[str, object] | None = {"field": "status", "perPage": 100}
         result: list[dict[str, object]] = []
         while url:
-            async with self._session.get(
+            _status, body, links = await self._request_retry(
+                "get",
                 url,
                 headers=await self._build_headers(auth),
                 params=params,
-            ) as response:
-                response.raise_for_status()
-                page = await response.json()
-                if not isinstance(page, list):
-                    raise ValueError("Tracker changelog response is not a list")
-                result.extend(page)
-                next_link = response.links.get("next")
-                url = next_link["url"] if next_link else ""
-                params = None
+            )
+            page = json.loads(body)
+            if not isinstance(page, list):
+                raise ValueError("Tracker changelog response is not a list")
+            result.extend(page)
+            next_link = links.get("next")
+            url = next_link["url"] if next_link else ""
+            params = None
         return result
 
     async def issue_get_worklogs(
