@@ -1196,7 +1196,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             changelogs = await asyncio.gather(
                 *(fetch_changelog(issue) for issue in sampled_issues)
             )
-            for issue, changelog in zip(sampled_issues, changelogs, strict=True):
+            for _issue, changelog in zip(sampled_issues, changelogs, strict=True):
                 events = _status_events(changelog)
                 if not events:
                     continue
