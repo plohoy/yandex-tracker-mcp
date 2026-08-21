@@ -1015,9 +1015,16 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                         ],
                     }
                     continue
-                metrics = await _carryover_metrics(
-                    issues_api, auth, candidates[0], q, max_issues
-                )
+                try:
+                    metrics = await _carryover_metrics(
+                        issues_api, auth, candidates[0], q, max_issues
+                    )
+                except Exception as exc:  # noqa: BLE001 — one bad board must not fail the org-wide view
+                    per_queue[q] = {
+                        "status": "board_error",
+                        "error": type(exc).__name__,
+                    }
+                    continue
                 entry = {k: v for k, v in metrics.items() if k != "carried_table"}
                 per_queue[q] = entry
                 if entry.get("status") == "complete":
@@ -1083,7 +1090,17 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             board = candidates[0]
         else:
             board = {"id": board_id, "name": None}
-        metrics = await _carryover_metrics(issues_api, auth, board, queue, max_issues)
+        try:
+            metrics = await _carryover_metrics(issues_api, auth, board, queue, max_issues)
+        except Exception as exc:  # noqa: BLE001 — surface board errors structurally
+            return {
+                "status": "upstream_error",
+                "complete": False,
+                "queue": queue,
+                "board_id": board["id"],
+                "error": type(exc).__name__,
+                "required_action": "Try another board or retry later.",
+            }
         if metrics["status"] != "complete":
             return {**metrics, "queue": queue}
         return {
