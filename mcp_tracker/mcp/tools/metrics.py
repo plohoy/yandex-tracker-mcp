@@ -309,7 +309,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "Use for 'сколько времени тестируется', 'время реворка', "
             "'что сейчас чинится после провала'. Optionally scope to a "
             "release version. Changelog per issue is cached server-side; "
-            "the in-rework table is capped (rows_capped in coverage)."
+            "the in-rework table is capped (rows_capped in coverage). "
+            "Use for «цикл тестирования», «сколько длится тестирование», "
+            "«время реворка»."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -854,7 +856,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "recent sprints by end date, and reports carried-over issues. Use "
             "for 'сколько перенесли между спринтами', 'перегрузка "
             "планирования'. The carried table is capped (rows_capped in "
-            "coverage)."
+            "coverage). Use for «переносы спринтов», «что перенесли со спринта»."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )

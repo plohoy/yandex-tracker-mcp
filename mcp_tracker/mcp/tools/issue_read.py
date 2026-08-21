@@ -1268,7 +1268,8 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "start with page=1, then page=2..N until you have collected "
             "coverage.total_rows rows. Never call the same page twice — "
             "re-fetching data you already have bloats the context and can "
-            "exceed the model's memory limit."
+            "exceed the model's memory limit. "
+            "Use for «залежавшиеся», «что у X в тестировании», «загрузка тестировщиков»."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -1350,7 +1351,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "start with page=1, then page=2..N until you have collected "
             "coverage.total_rows rows. Never call the same page twice — "
             "re-fetching data you already have bloats the context and can "
-            "exceed the model's memory limit."
+            "exceed the model's memory limit. "
+            "Use for «долги по создателям», «открытые задачи по создателям», "
+            "«кто создал много открытых задач»."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -2208,7 +2211,8 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "measure='estimation' and measure='spent', then take rows by the keys "
             "already known from issues_count_release_status_returns. NEVER loop "
             "issue_get/issue_get_worklogs per task for these numbers — 10+ calls of "
-            "~10KB each bloats the context and hits the server memory limit."
+            "~10KB each bloats the context and hits the server memory limit. "
+            "Use for «оценки релиза», «оценки по релизу», «сколько оценено в релизе»."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -2380,7 +2384,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "For counting queries ('посчитай возвраты', 'таблица задач с возвратами') "
             "ALWAYS pass include_evidence=false AND returned_only=true — the response "
             "shrinks ~80% (only returned tasks, no proof lists); counters and coverage "
-            "stay complete. The full evidence is only needed for audits."
+            "stay complete. The full evidence is only needed for audits. "
+            "Use for «возвраты релиза», «сколько возвратов в релизе», "
+            "«реворки по релизу»."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
