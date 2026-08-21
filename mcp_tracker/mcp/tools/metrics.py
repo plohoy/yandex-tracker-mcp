@@ -17,6 +17,7 @@ reporting_contract, list fields self-capped to the response budget
 (rows_capped in coverage), counters always complete.
 """
 
+import asyncio
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
@@ -364,10 +365,18 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         rework_hours = 0.0
         with_history = 0
         in_rework_now: list[dict[str, Any]] = []
-        for issue in issues:
-            changelog = await issues_api.issue_get_status_changelog(
-                issue.key, auth=auth
-            )
+        semaphore = asyncio.Semaphore(4)
+
+        async def fetch_changelog(issue: Any) -> list[Any]:
+            async with semaphore:
+                return await issues_api.issue_get_status_changelog(
+                    issue.key, auth=auth
+                )
+
+        changelogs = await asyncio.gather(
+            *(fetch_changelog(issue) for issue in issues)
+        )
+        for issue, changelog in zip(issues, changelogs, strict=True):
             events = _status_events(changelog)
             if not events:
                 continue
@@ -1176,10 +1185,19 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             reworks = 0
             rework_hours = 0.0
             issues_with_returns = 0
-            for issue in sampled_issues:
-                events = _status_events(
-                    await issues_api.issue_get_status_changelog(issue.key, auth=auth)
-                )
+            semaphore = asyncio.Semaphore(4)
+
+            async def fetch_changelog(issue: Any) -> list[Any]:
+                async with semaphore:
+                    return await issues_api.issue_get_status_changelog(
+                        issue.key, auth=auth
+                    )
+
+            changelogs = await asyncio.gather(
+                *(fetch_changelog(issue) for issue in sampled_issues)
+            )
+            for issue, changelog in zip(sampled_issues, changelogs, strict=True):
+                events = _status_events(changelog)
                 if not events:
                     continue
                 metrics = _cycle_metrics(events)
