@@ -60,8 +60,8 @@ def _discipline_table(
 ) -> str:
     """Pre-built discipline table in the compact format the user is used to
     (short headers, whole percents, queue with total, ¹ footnote for capped
-    samples) as an aligned monospace block. No markdown pipes (they do not
-    render on Telegram) and the model copies the block verbatim."""
+    samples) as a well-formed markdown table (no code fence — the user's
+    surface renders tables). The model copies it verbatim."""
 
     def pct(metric: dict[str, Any]) -> str:
         share = metric.get("share")
@@ -93,22 +93,20 @@ def _discipline_table(
         )
     if not rows:
         return ""
-    widths = [
-        max(len(headers[i]), *(len(r[i]) for r in rows)) for i in range(len(headers))
-    ]
 
     def fmt(row: list[str]) -> str:
-        return "  ".join(v.ljust(widths[i]) for i, v in enumerate(row)).rstrip()
+        return "| " + " | ".join(row) + " |"
 
-    lines = [fmt(headers), *map(fmt, rows)]
+    lines = [fmt(headers), "|" + "---|" * len(headers), *map(fmt, rows)]
     if capped:
+        lines.append("")
         lines.append("¹ выборка неполная (потолок выборки).")
-    return "```\n" + "\n".join(lines) + "\n```"
+    return "\n".join(lines)
 
 
 def _workset_table(per_queue: dict[str, dict[str, Any]]) -> str:
-    """Pre-built workset table (non-empty queues only) as an aligned monospace
-    block — same compact look the user already had."""
+    """Pre-built workset table (non-empty queues only) as a well-formed
+    markdown table — the compact look the user already had."""
 
     headers = ["Очередь", "В тесте", "Зависшие (5+ дн)"]
     rows: list[list[str]] = []
@@ -120,14 +118,11 @@ def _workset_table(per_queue: dict[str, dict[str, Any]]) -> str:
         rows.append([queue, str(in_testing), str(stale)])
     if not rows:
         return ""
-    widths = [
-        max(len(headers[i]), *(len(r[i]) for r in rows)) for i in range(len(headers))
-    ]
 
     def fmt(row: list[str]) -> str:
-        return "  ".join(v.ljust(widths[i]) for i, v in enumerate(row)).rstrip()
+        return "| " + " | ".join(row) + " |"
 
-    return "```\n" + "\n".join([fmt(headers), *map(fmt, rows)]) + "\n```"
+    return "\n".join([fmt(headers), "|" + "---|" * len(headers), *map(fmt, rows)])
 
 
 def _hours_between(start: Any, end: Any) -> float:
@@ -857,9 +852,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "'без описания', 'зависшие задачи'. The stale table is capped "
             "(rows_capped in coverage). The per_queue breakdown covers ALL "
             "queues and always fits inline — never assume it was truncated; "
-            "report every queue row. Copy the pre-built compact tables (keys "
-            "'table') VERBATIM into the answer — never rebuild or convert "
-            "them (markdown pipes do not render on Telegram)."
+            "report every queue row. Copy the pre-built markdown table (key "
+            "'table') VERBATIM into the answer with every row on its own "
+            "line — never rebuild or collapse it."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -1221,9 +1216,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "only — no per-task tables; point the user to the specific "
             "metric tools for detail. The response fits the inline budget — "
             "never assume truncation unless coverage reports rows_capped=true. "
-            "Copy the pre-built compact tables (keys 'workset_table' and "
-            "'discipline_table') VERBATIM into the answer — never rebuild "
-            "or convert them (markdown pipes do not render on Telegram). "
+            "Copy the pre-built markdown tables (keys 'workset_table' and "
+            "'discipline_table') VERBATIM into the answer with every row on "
+            "its own line — never rebuild or collapse them. "
             "Transient API errors (429/504) are retried INSIDE the tool — if "
             "a call fails, retry the SAME call once; never assemble the "
             "dashboard from other tools and never use terminal/scripts to wait."

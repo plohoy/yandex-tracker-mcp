@@ -705,7 +705,7 @@ class TestSprintCarryoverAllQueues:
 
 
 class TestDisciplineTable:
-    def test_compact_aligned_monospace_block(self) -> None:
+    def test_compact_markdown_table(self) -> None:
         from mcp_tracker.mcp.tools.metrics import _discipline_table
 
         table = _discipline_table(
@@ -722,16 +722,15 @@ class TestDisciplineTable:
             "stale_non_final",
         )
         lines = table.splitlines()
-        assert lines[0] == "```"
-        assert lines[-1] == "```"
-        # compact format: short headers, whole percents, queue with total
-        assert "|" not in table
-        assert "Без факт. времени" in table
+        # well-formed markdown table, no code fence
+        assert "```" not in table
+        assert lines[1] == "|---|---|---|---|---|"
+        assert "| Очередь |" in table
         assert "76%" in table
         assert "Q1 (100)" in table
         # every row on its own line (the bug: one collapsed line)
-        assert sum(1 for line in lines if line.strip().startswith("Q1")) == 1
-        assert sum(1 for line in lines if line.strip().startswith("Очередь")) == 1
+        assert sum(1 for line in lines if line.strip().startswith("| Q1")) == 1
+        assert sum(1 for line in lines if line.strip().startswith("| Очередь")) == 1
 
     def test_capped_footnote(self) -> None:
         from mcp_tracker.mcp.tools.metrics import _discipline_table
@@ -761,6 +760,6 @@ class TestDisciplineTable:
                 "Q2": {"in_testing": 0, "stale_in_testing_5d": 0},
             }
         )
-        assert "Q1" in table and "5" in table
+        assert "| Q1 | 5 | 2 |" in table
         assert "Q2" not in table
-        assert "|" not in table
+        assert "```" not in table
