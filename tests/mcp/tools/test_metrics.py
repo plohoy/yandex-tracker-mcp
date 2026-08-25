@@ -627,6 +627,128 @@ class TestQaWorkset:
         assert content["filter"]["assignee"] == "не назначен"
 
 
+class TestQaTasksCompact:
+    async def test_complete_compact_list_without_sprints_or_public_pagination(
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_fields_protocol: AsyncMock,
+    ) -> None:
+        from mcp_tracker.tracker.proto.types.statuses import Status
+
+        mock_fields_protocol.get_statuses = AsyncMock(
+            return_value=[
+                Status.model_construct(key="readyForTest", name="Можно тестировать"),
+                Status.model_construct(key="testing", name="Тестируется"),
+                Status.model_construct(key="open", name="Открыт"),
+            ]
+        )
+        first_page = [
+            _issue(
+                f"TEST-{index}",
+                status="readyForTest" if index % 2 else "testing",
+                assignee="Иван" if index % 3 else None,
+            )
+            for index in range(100)
+        ]
+        second_page = [_issue("TEST-100", status="testing", assignee="Пётр")]
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            side_effect=[first_page, second_page]
+        )
+
+        result = await client_session.call_tool(
+            "issues_list_qa_tasks", {"queues": ["test", "TEST"]}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["status"] == "complete"
+        assert content["queues"] == ["TEST"]
+        assert content["total_unique"] == 101
+        assert content["coverage"]["complete"] is True
+        assert content["coverage"]["queues"]["TEST"]["pages_fetched"] == 2
+        assert content["columns"] == [
+            "queue", "key", "title", "status", "semantic_class", "assignee"
+        ]
+        assert len(content["tasks"]) == 101
+        assert content["counts"]["TEST"] == {
+            "qa_ready": 50, "qa_active": 51, "total": 101
+        }
+        calls = mock_issues_protocol.issues_find_filter.await_args_list
+        assert [call.kwargs["page"] for call in calls] == [1, 2]
+        assert all(
+            call.args[0] == {
+                "queue": "TEST", "status": ["readyForTest", "testing"]
+            }
+            for call in calls
+        )
+        assert all("sprint" not in call.kwargs["fields"] for call in calls)
+        mock_issues_protocol.boards_get_all.assert_not_awaited()
+        assert content["reporting_contract"]["single_call_terminal_result"] is True
+
+        tools = await client_session.list_tools()
+        schema = next(
+            tool.inputSchema for tool in tools.tools if tool.name == "issues_list_qa_tasks"
+        )
+        assert set(schema["properties"]) == {"queues", "max_issues_per_queue"}
+        assert "page" not in schema["properties"]
+        assert "per_page" not in schema["properties"]
+
+    async def test_invalid_queue_is_rejected_without_tracker_calls(
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_fields_protocol: AsyncMock,
+    ) -> None:
+        result = await client_session.call_tool(
+            "issues_list_qa_tasks", {"queues": ["bad queue"]}
+        )
+        content = get_tool_result_content(result)
+        assert content["status"] == "invalid_request"
+        mock_fields_protocol.get_statuses.assert_not_awaited()
+        mock_issues_protocol.issues_find_filter.assert_not_awaited()
+
+    async def test_large_result_is_delivered_as_complete_csv_attachment(
+        self,
+        client_session: ClientSession,
+        mock_issues_protocol: AsyncMock,
+        mock_fields_protocol: AsyncMock,
+    ) -> None:
+        import csv
+        from pathlib import Path
+
+        from mcp_tracker.tracker.proto.types.statuses import Status
+
+        mock_fields_protocol.get_statuses = AsyncMock(
+            return_value=[Status.model_construct(key="readyForTest", name="Можно тестировать")]
+        )
+        issue = _issue("TEST-1", status="readyForTest", assignee="Иван")
+        issue.summary = "=опасная формула " + ("длинный заголовок " * 2_000)
+        mock_issues_protocol.issues_find_filter = AsyncMock(return_value=[issue])
+
+        result = await client_session.call_tool(
+            "issues_list_qa_tasks", {"queues": ["TEST"]}
+        )
+
+        content = get_tool_result_content(result)
+        artifact = Path(content["artifact_path"])
+        try:
+            assert content["status"] == "complete"
+            assert content["delivery"] == "csv_attachment"
+            assert content["tasks"] == []
+            assert content["total_unique"] == 1
+            assert content["coverage"]["complete"] is True
+            assert content["reporting_contract"]["send_media_path_exactly_once"] is True
+            assert artifact.is_file()
+            with artifact.open(encoding="utf-8-sig", newline="") as source:
+                rows = list(csv.reader(source))
+            assert rows[0] == content["columns"]
+            assert len(rows) == 2
+            assert rows[1][1] == "TEST-1"
+            assert rows[1][2].startswith("'=опасная формула")
+        finally:
+            artifact.unlink(missing_ok=True)
+
+
 class TestCreatedOpenAggregate:
     async def test_aggregate_groups_by_creator(
         self, client_session: ClientSession, mock_issues_protocol: AsyncMock

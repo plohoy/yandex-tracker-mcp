@@ -22,9 +22,9 @@ moved to 0.8.0 (entities API; `issues_summarize_effort` removed) — this fork
 intentionally stays on 0.7.1 because the runtime integration depends on
 `issues_summarize_effort`. Upstream sync stays possible via the `upstream` remote.
 
-### Changes vs upstream v0.7.1 (38 → 54 tools)
+### Changes vs upstream v0.7.1 (38 → 56 tools)
 
-**New tools (10, in `issue_read.py` / `user.py`):**
+**New tools (12, in `issue_read.py` / `user.py`):**
 
 - `issues_count_release_status_returns` — returns per release version with
   three metrics (`qa_rework_cycle` default, `testing_rework`, `repeated_work_status`)
@@ -33,6 +33,10 @@ intentionally stays on 0.7.1 because the runtime integration depends on
 - `issues_summarize_numeric_field_by_version` — sum any numeric field per release
 - `issues_list_qa_workset` — semantic "in testing" workset across queues
   (stale/sprint filters, board resolution)
+- `issues_list_qa_tasks` — complete compact current-QA task list in one call;
+  no public pagination and no board/sprint loading
+- `issues_overdue` — exhaustive queue-scoped overdue list with strict deadline
+  semantics and complete-coverage reporting
 - `issues_count_queue_status` / `issues_count_current_sprint_status` — status
   distributions
 - `issues_search_text` — safe full-text search (no free-form YQL)

@@ -1,7 +1,7 @@
 import pytest
 from mcp.client.session import ClientSession
 
-# Read-only tool names (34 tools) - always registered
+# Read-only tool names - always registered
 READ_ONLY_TOOL_NAMES = [
     # Queue tools (5)
     "queues_get_all",
@@ -34,6 +34,8 @@ READ_ONLY_TOOL_NAMES = [
     "issues_count_release_status_returns",
     "issues_created_open",
     "issues_list_qa_workset",
+    "issues_list_qa_tasks",
+    "issues_overdue",
     "issues_search_text",
     "issues_summarize_effort",
     "issues_summarize_numeric_field_by_version",

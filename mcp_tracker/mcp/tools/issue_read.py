@@ -1,10 +1,13 @@
 """Issue read-only MCP tools."""
 
+import asyncio
+import csv
 import hashlib
 import json
 import logging
 import re
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
@@ -1046,6 +1049,325 @@ async def issues_assigned_open_core(
     )
 
 
+_OVERDUE_PAGE_SIZE = 100
+_OVERDUE_MAX_PAGES = 100
+
+
+def _parse_as_of(value: str | None) -> date:
+    if value is None:
+        return date.today()
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("as_of must be an ISO date in YYYY-MM-DD format") from exc
+
+
+async def issues_overdue_core(
+    issues_api: Any,
+    auth: Any,
+    *,
+    queue: str,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Exhaustively list non-final issues whose deadline is before as_of."""
+    queue_key = queue.strip().upper() if isinstance(queue, str) else ""
+    reporting_contract = {
+        "overdue_definition": "non-final issue with deadline strictly before as_of",
+        "missing_deadline_is_not_overdue": True,
+        "use_only_returned_issues": True,
+        "report_coverage_verbatim": True,
+        "do_not_recalculate_or_group": True,
+        "do_not_add_unsourced_analysis": True,
+    }
+    if not _QUEUE_KEY_RE.fullmatch(queue_key):
+        return {
+            "status": "invalid_request",
+            "error": "queue must be a canonical queue key such as YOURQUEUE",
+            "issues": [],
+            "coverage": {"complete": False, "reason": "invalid queue"},
+            "reporting_contract": reporting_contract,
+        }
+    try:
+        cutoff = _parse_as_of(as_of)
+    except ValueError as exc:
+        return {
+            "status": "invalid_request",
+            "error": str(exc),
+            "issues": [],
+            "coverage": {"complete": False, "reason": "invalid as_of"},
+            "reporting_contract": reporting_contract,
+        }
+
+    seen: set[str] = set()
+    overdue: list[dict[str, Any]] = []
+    scanned = final_count = missing_deadline = unknown_status_type = 0
+    pages_fetched = 0
+    try:
+        for page_number in range(1, _OVERDUE_MAX_PAGES + 1):
+            batch = await issues_api.issues_find_filter(
+                {"queue": queue_key},
+                fields=[
+                    "key", "summary", "status", "statusType", "assignee",
+                    "deadline", "updatedAt", "queue",
+                ],
+                per_page=_OVERDUE_PAGE_SIZE,
+                page=page_number,
+                auth=auth,
+            )
+            pages_fetched += 1
+            if not batch:
+                break
+            for issue in batch:
+                key = getattr(issue, "key", None)
+                if not key:
+                    raise RuntimeError(f"issue without key at page {page_number}")
+                if key in seen:
+                    raise RuntimeError(f"unstable pagination: duplicate issue {key}")
+                seen.add(key)
+                scanned += 1
+                status_type = getattr(issue, "statusType", None)
+                status_type_key = _reference_key(status_type)
+                if status_type_key in _FINAL_STATUS_TYPE_KEYS:
+                    final_count += 1
+                    continue
+                if status_type_key is None:
+                    unknown_status_type += 1
+                deadline_value = getattr(issue, "deadline", None)
+                if deadline_value is None:
+                    missing_deadline += 1
+                    continue
+                if isinstance(deadline_value, str):
+                    deadline_value = date.fromisoformat(deadline_value[:10])
+                if deadline_value >= cutoff:
+                    continue
+                assignee = getattr(issue, "assignee", None)
+                status = getattr(issue, "status", None)
+                updated_at = getattr(issue, "updated_at", None)
+                overdue.append({
+                    "key": key,
+                    "summary": getattr(issue, "summary", None),
+                    "assignee": _reference_display(assignee),
+                    "status": _reference_display(status),
+                    "deadline": deadline_value.isoformat(),
+                    "updated_at": updated_at.isoformat() if hasattr(updated_at, "isoformat") else updated_at,
+                    "url": f"https://tracker.yandex.ru/{key}",
+                })
+            if len(batch) < _OVERDUE_PAGE_SIZE:
+                break
+        else:
+            return {
+                "status": "partial",
+                "queue": queue_key,
+                "as_of": cutoff.isoformat(),
+                "issues": sorted(overdue, key=lambda item: (item["deadline"], item["key"])),
+                "counts": {"processed": scanned, "overdue": len(overdue), "final_excluded": final_count, "without_deadline_excluded": missing_deadline, "unknown_status_type_included_as_open": unknown_status_type},
+                "coverage": {"complete": False, "reason": f"safety limit of {_OVERDUE_MAX_PAGES} pages reached", "pages_fetched": pages_fetched},
+                "reporting_contract": reporting_contract,
+            }
+    except Exception as exc:
+        return {
+            "status": "upstream_error",
+            "queue": queue_key,
+            "as_of": cutoff.isoformat(),
+            "error": f"{type(exc).__name__}: {exc}",
+            "issues": [],
+            "coverage": {"complete": False, "reason": "upstream or pagination error", "pages_fetched": pages_fetched},
+            "reporting_contract": reporting_contract,
+        }
+
+    overdue.sort(key=lambda item: (item["deadline"], item["key"]))
+    return {
+        "status": "ok" if overdue else "no_overdue_issues",
+        "queue": queue_key,
+        "as_of": cutoff.isoformat(),
+        "issues": overdue,
+        "counts": {"processed": scanned, "overdue": len(overdue), "final_excluded": final_count, "without_deadline_excluded": missing_deadline, "unknown_status_type_included_as_open": unknown_status_type},
+        "coverage": {"complete": True, "reason": None, "pages_fetched": pages_fetched, "unique_issues": len(seen)},
+        "reporting_contract": reporting_contract,
+    }
+
+
+async def issues_list_qa_tasks_core(
+    issues_api: Any,
+    fields_api: Any,
+    auth: Any,
+    *,
+    queues: list[str],
+    max_issues_per_queue: int = 2_000,
+) -> dict[str, Any]:
+    """Return a compact complete QA task list in one server-owned operation."""
+    canonical: list[str] = []
+    for queue in queues:
+        if not isinstance(queue, str) or not _QUEUE_KEY_RE.fullmatch(queue.strip()):
+            return {
+                "status": "invalid_request",
+                "error": f"Invalid canonical queue key: {queue!r}",
+                "tasks": [],
+                "coverage": {"complete": False, "reason": "invalid queue"},
+            }
+        key = queue.strip().upper()
+        if key not in canonical:
+            canonical.append(key)
+    if not canonical:
+        return {
+            "status": "invalid_request",
+            "error": "queues must contain at least one canonical queue key",
+            "tasks": [],
+            "coverage": {"complete": False, "reason": "empty queue list"},
+        }
+
+    statuses = await fields_api.get_statuses(auth=auth)
+    status_classes: dict[str, tuple[str, str]] = {}
+    for status in statuses:
+        display = " ".join(status.name.split())
+        probe = f"{display} {status.key}"
+        if _QA_READY_STATUS_RE.search(probe):
+            status_classes[status.key] = (display, "qa_ready")
+        elif _QA_ACTIVE_STATUS_RE.fullmatch(display) or _QA_ACTIVE_STATUS_RE.fullmatch(status.key):
+            status_classes[status.key] = (display, "qa_active")
+    if not status_classes:
+        return {
+            "status": "no_qa_statuses",
+            "queues": canonical,
+            "tasks": [],
+            "coverage": {"complete": True, "reason": None, "queues": {}},
+        }
+
+    semaphore = asyncio.Semaphore(6)
+
+    async def scan_queue(queue: str) -> tuple[str, list[Issue], int]:
+        found: list[Issue] = []
+        page = 1
+        pages = 0
+        async with semaphore:
+            while True:
+                batch = await issues_api.issues_find_filter(
+                    {"queue": queue, "status": list(status_classes)},
+                    fields=["key", "summary", "status", "assignee"],
+                    per_page=100,
+                    page=page,
+                    auth=auth,
+                )
+                pages += 1
+                found.extend(batch)
+                if len(found) > max_issues_per_queue:
+                    raise ValueError(
+                        f"Queue {queue} exceeds max_issues_per_queue={max_issues_per_queue}"
+                    )
+                if len(batch) < 100:
+                    break
+                page += 1
+        return queue, found, pages
+
+    try:
+        scanned = await asyncio.gather(*(scan_queue(queue) for queue in canonical))
+    except Exception as exc:
+        return {
+            "status": "upstream_error",
+            "error": f"{type(exc).__name__}: {exc}",
+            "queues": canonical,
+            "tasks": [],
+            "coverage": {"complete": False, "reason": "upstream or safety error"},
+        }
+
+    rows_by_key: dict[str, list[Any]] = {}
+    queue_coverage: dict[str, dict[str, int | bool]] = {}
+    counts = {queue: {"qa_ready": 0, "qa_active": 0, "total": 0} for queue in canonical}
+    for queue, issues, pages in scanned:
+        queue_coverage[queue] = {
+            "complete": True,
+            "issues_matched": len(issues),
+            "pages_fetched": pages,
+        }
+        for issue in issues:
+            if not issue.key:
+                continue
+            status_key = issue.status.key if issue.status else None
+            status_info = status_classes.get(status_key or "")
+            if status_info is None:
+                continue
+            display, semantic_class = status_info
+            if issue.key in rows_by_key:
+                continue
+            rows_by_key[issue.key] = [
+                queue,
+                issue.key,
+                issue.summary,
+                issue.status.display if issue.status else display,
+                semantic_class,
+                issue.assignee.display if issue.assignee else "не назначен",
+            ]
+            counts[queue][semantic_class] += 1
+            counts[queue]["total"] += 1
+
+    tasks = sorted(rows_by_key.values(), key=lambda row: (row[0], row[1]))
+    response = {
+        "status": "complete",
+        "scope": "entire_queues_current_qa",
+        "queues": canonical,
+        "columns": ["queue", "key", "title", "status", "semantic_class", "assignee"],
+        "tasks": tasks,
+        "total_unique": len(tasks),
+        "counts": counts,
+        "resolved_statuses": [
+            {"key": key, "display": value[0], "semantic_class": value[1]}
+            for key, value in status_classes.items()
+        ],
+        "coverage": {"complete": True, "reason": None, "queues": queue_coverage},
+        "reporting_contract": {
+            "single_call_terminal_result": True,
+            "no_public_pagination": True,
+            "copy_tasks_verbatim": True,
+            "do_not_call_qa_workset_for_more_pages": True,
+            "total_unique_must_equal_rendered_rows": True,
+            "sprint_data_not_requested_or_loaded": True,
+        },
+    }
+    if _response_size(response) > _RESPONSE_BUDGET_CHARS:
+        output = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8-sig",
+            newline="",
+            prefix="yandex-tracker-qa-tasks-",
+            suffix=".csv",
+            delete=False,
+        )
+        with output:
+            writer = csv.writer(output)
+            writer.writerow(response["columns"])
+            for row in tasks:
+                writer.writerow(
+                    [
+                        f"'{value}" if isinstance(value, str) and value.startswith(("=", "+", "-", "@")) else value
+                        for value in row
+                    ]
+                )
+        return {
+            "status": "complete",
+            "delivery": "csv_attachment",
+            "artifact_path": output.name,
+            "artifact_format": "csv_utf8_bom",
+            "queues": canonical,
+            "tasks": [],
+            "columns": response["columns"],
+            "total_unique": len(tasks),
+            "counts": counts,
+            "resolved_statuses": response["resolved_statuses"],
+            "coverage": {
+                "complete": True,
+                "reason": "complete scan; full task list delivered as CSV attachment",
+                "queues": queue_coverage,
+            },
+            "reporting_contract": {
+                **response["reporting_contract"],
+                "send_media_path_exactly_once": True,
+                "do_not_retry_for_inline_rows": True,
+                "do_not_claim_tasks_are_missing": True,
+            },
+        }
+    return response
+
+
 async def issues_created_open_core(
     issues_api: Any,
     auth: Any,
@@ -1322,6 +1644,61 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             text=text,
             queue=queue,
             limit=limit,
+        )
+
+    @mcp.tool(
+        title="List Overdue Issues in a Queue",
+        description=(
+            "Exhaustively list overdue issues in one canonical queue. Overdue means "
+            "a non-final issue with an explicit deadline strictly before as_of; issues "
+            "without a deadline are counted separately and never treated as overdue. "
+            "The tool owns filtering and complete pagination, accepts no YQL, and is "
+            "read-only. Report counts and coverage verbatim. A successful call proves "
+            "Yandex Tracker MCP is connected; never start an MCP or REST fallback. "
+            "Do not recalculate, regroup, or append analysis not returned by the tool."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    async def issues_overdue(
+        ctx: Context[Any, AppContext],
+        queue: Annotated[str, Field(description="Canonical queue key, for example YOURQUEUE", min_length=1, max_length=64)],
+        as_of: Annotated[str | None, Field(description="Optional ISO date YYYY-MM-DD; defaults to the server's current date")] = None,
+    ) -> dict[str, Any]:
+        return await issues_overdue_core(
+            ctx.request_context.lifespan_context.issues,
+            get_yandex_auth(ctx),
+            queue=queue,
+            as_of=as_of,
+        )
+
+    @mcp.tool(
+        title="List Current QA Tasks Across Queues",
+        description=(
+            "Return the complete compact list of tasks currently in QA across canonical "
+            "queues: qa_ready plus qa_active. Use for 'какие задачи сейчас в QA/в "
+            "тестировании' when sprint dates were not requested. One call is terminal: "
+            "the server owns complete pagination and returns queue, key, title, status, "
+            "semantic class, assignee, counts and coverage. It deliberately has no page "
+            "arguments and never loads boards or sprints. Never follow it with "
+            "issues_list_qa_workset to fetch more rows."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    async def issues_list_qa_tasks(
+        ctx: Context[Any, AppContext],
+        queues: Annotated[
+            list[str],
+            Field(min_length=1, max_length=50, description="Resolved canonical queue keys"),
+        ],
+        max_issues_per_queue: Annotated[int, Field(ge=1, le=10_000)] = 2_000,
+    ) -> dict[str, Any]:
+        app = ctx.request_context.lifespan_context
+        return await issues_list_qa_tasks_core(
+            app.issues,
+            app.fields,
+            get_yandex_auth(ctx),
+            queues=queues,
+            max_issues_per_queue=max_issues_per_queue,
         )
 
     @mcp.tool(
