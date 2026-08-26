@@ -22,10 +22,13 @@ moved to 0.8.0 (entities API; `issues_summarize_effort` removed) — this fork
 intentionally stays on 0.7.1 because the runtime integration depends on
 `issues_summarize_effort`. Upstream sync stays possible via the `upstream` remote.
 
-### Changes vs upstream v0.7.1 (38 → 56 tools)
+### Changes vs upstream v0.7.1 (38 → 57 tools)
 
-**New tools (12, in `issue_read.py` / `user.py`):**
+**New tools (13, in `issue_read.py` / `user.py`):**
 
+- `issues_count_release_returns_by_name` — resolves a release name inside one
+  canonical queue and calculates compact complete returns in one call;
+  ambiguous prefixes stop before scanning issues
 - `issues_count_release_status_returns` — returns per release version with
   three metrics (`qa_rework_cycle` default, `testing_rework`, `repeated_work_status`)
 - `issues_summarize_effort` — estimation/spent totals for an epic or release
@@ -69,7 +72,7 @@ intentionally stays on 0.7.1 because the runtime integration depends on
 |---|---|
 | `дашборд отдела QA` | `issues_metrics_qa_dashboard` (org-wide workset + active release + cycle + defects + discipline, one call) |
 | `готовность релиза X` | `issues_metrics_release_readiness(version_id, queue?)` |
-| `возвраты релиза X` | `issues_count_release_status_returns(include_evidence=false, returned_only=true)` |
+| `возвраты релиза X QUEUE` | `issues_count_release_returns_by_name(queue, release)` — one call |
 | `оценки релиза X` | `issues_summarize_effort` twice (estimation + spent) + % without estimation |
 | `цикл тестирования` | `issues_metrics_testing_cycle(queue, max_issues)` |
 | `тренд багов` | `issues_metrics_defect_trend(created_after, queues? — org-wide)` |

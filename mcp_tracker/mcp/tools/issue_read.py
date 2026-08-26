@@ -25,7 +25,7 @@ from mcp_tracker.mcp.params import (
     PerPageParam,
     YTQuery,
 )
-from mcp_tracker.mcp.tools._access import check_issue_access
+from mcp_tracker.mcp.tools._access import check_issue_access, check_queue_access
 from mcp_tracker.mcp.tools.user import _user_display_name, resolve_assignee_core
 from mcp_tracker.mcp.utils import get_yandex_auth, set_non_needed_fields_null
 from mcp_tracker.settings import Settings
@@ -1999,6 +1999,91 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             },
             "table",
         )
+
+    @mcp.tool(
+        title="Count Release Returns by Queue and Release Name",
+        description=(
+            "Fast deterministic route for short requests such as «возвраты релиза "
+            "7.0.0 YOURQUEUE». Resolves one release inside the canonical queue and "
+            "immediately calculates the complete compact return table. Call this "
+            "tool directly when the user supplies a queue key and release name; do "
+            "not call queues_get_all or queue_get_versions first. Exact full-name "
+            "matches win. A short name such as 7.0.0 is accepted only when it is a "
+            "unique version-name prefix; ambiguity is returned without scanning issues."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    async def issues_count_release_returns_by_name(
+        ctx: Context[Any, AppContext],
+        queue: Annotated[
+            str,
+            Field(description="Canonical Yandex Tracker queue key, for example YOURQUEUE"),
+        ],
+        release: Annotated[
+            str,
+            Field(description="Release name or unique leading version, for example 7.0.0"),
+        ],
+        metric: Annotated[
+            Literal["qa_rework_cycle", "testing_rework", "repeated_work_status"],
+            Field(description="Server-owned return metric"),
+        ] = "qa_rework_cycle",
+        max_issues: Annotated[int, Field(ge=1, le=500)] = 200,
+    ) -> dict[str, Any]:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
+            raise ValueError("queue must be a Yandex Tracker queue key")
+        check_queue_access(settings, queue)
+        requested = " ".join(release.split()).casefold()
+        if not requested:
+            raise ValueError("release must not be empty")
+
+        auth = get_yandex_auth(ctx)
+        versions = await ctx.request_context.lifespan_context.queues.queues_get_versions(
+            queue,
+            auth=auth,
+        )
+        exact = [version for version in versions if version.name.casefold() == requested]
+        candidates = exact or [
+            version
+            for version in versions
+            if version.name.casefold().startswith(requested + " ")
+        ]
+        compact_candidates = [
+            {"id": version.id, "name": version.name}
+            for version in sorted(candidates, key=lambda item: (item.name.casefold(), item.id))
+        ]
+        if not candidates:
+            return {
+                "status": "release_not_found",
+                "queue": queue,
+                "requested_release": release,
+                "candidates": [],
+                "coverage": {"issues_scanned": 0, "complete": False},
+            }
+        if len(candidates) != 1:
+            return {
+                "status": "ambiguous_release",
+                "queue": queue,
+                "requested_release": release,
+                "candidates": compact_candidates,
+                "coverage": {"issues_scanned": 0, "complete": False},
+            }
+
+        version = candidates[0]
+        result = await issues_count_release_status_returns(
+            ctx=ctx,
+            version_id=version.id,
+            queue=queue,
+            metric=metric,
+            max_issues=max_issues,
+            include_evidence=False,
+            returned_only=True,
+            page=1,
+            per_page=None,
+        )
+        return {
+            **result,
+            "resolved_release": {"id": version.id, "name": version.name},
+        }
 
     @mcp.tool(
         title="List QA Workset Across Queues",

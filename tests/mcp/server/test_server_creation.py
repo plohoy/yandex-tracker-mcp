@@ -32,6 +32,7 @@ READ_ONLY_TOOL_NAMES = [
     "issues_count_current_sprint_status",
     "issues_count_queue_status",
     "issues_count_release_status_returns",
+    "issues_count_release_returns_by_name",
     "issues_created_open",
     "issues_list_qa_workset",
     "issues_list_qa_tasks",
