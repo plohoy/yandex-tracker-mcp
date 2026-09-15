@@ -1049,6 +1049,345 @@ async def issues_assigned_open_core(
     )
 
 
+_ASSIGNEE_ACTIVITY_PAGE_SIZE = 100
+_ASSIGNEE_ACTIVITY_MAX_PAGES = 20
+_ASSIGNEE_ACTIVITY_CONCURRENCY = 8
+_ACTIVITY_IN_PROGRESS_RE = re.compile(
+    r"^(?:в работе|в разработке|разработка|будем делать|ревью|"
+    r"in[ _-]?progress|development|developing|review|code[ _-]?review)$",
+    re.IGNORECASE,
+)
+_ACTIVITY_CLOSED_RE = re.compile(
+    r"^(?:закрыт(?:о|а|ы|ая)?|выполнен(?:о|а|ы|ая)?|"
+    r"решён(?:о|а|ы|ая)?|решен(?:о|а|ы|ая)?|"
+    r"отменён(?:о|а|ы|ая)?|отменен(?:о|а|ы|ая)?|"
+    r"closed|done|resolved|cancelled|canceled)$",
+    re.IGNORECASE,
+)
+
+
+def _parse_activity_period(days: int, as_of: str | None) -> tuple[datetime, datetime]:
+    """Return a closed rolling UTC interval ending at ``as_of`` (or now)."""
+    if not 1 <= days <= 31:
+        raise ValueError("days must be between 1 and 31")
+    if as_of is None:
+        end = datetime.now(timezone.utc)
+    else:
+        text = as_of.strip()
+        try:
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+                parsed_date = date.fromisoformat(text)
+                end = datetime.combine(parsed_date, datetime.max.time(), timezone.utc)
+            else:
+                end = _to_utc(datetime.fromisoformat(text.replace("Z", "+00:00")))
+        except (TypeError, ValueError):
+            raise ValueError("as_of must be an ISO date or datetime") from None
+    return end - timedelta(days=days), end
+
+
+def _parse_changelog_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return _to_utc(datetime.fromisoformat(value.strip().replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _status_value(value: object) -> tuple[str | None, str | None]:
+    return _reference_key(value), _reference_display(value)
+
+
+def _activity_status_class(
+    key: str | None,
+    display: str | None,
+    *,
+    status_type_key: str | None = None,
+) -> str | None:
+    """Map queue-specific status names to stable activity classes."""
+    candidates = [part.strip() for part in (key, display) if part and part.strip()]
+    normalized = " ".join(candidates)
+    if status_type_key and status_type_key.casefold() in _FINAL_STATUS_TYPE_KEYS:
+        return "closed"
+    if any(_ACTIVITY_CLOSED_RE.fullmatch(part) for part in candidates):
+        return "closed"
+    if any(_QA_READY_STATUS_RE.search(part) or _QA_ACTIVE_STATUS_RE.fullmatch(part) for part in candidates):
+        return "testing"
+    if any(_ACTIVITY_IN_PROGRESS_RE.fullmatch(part) for part in candidates):
+        return "in_progress"
+    folded = normalized.casefold().replace("_", " ").replace("-", " ")
+    if "test" in folded or "тест" in folded or "провер" in folded or " qa" in f" {folded}":
+        return "testing"
+    return None
+
+
+async def issues_list_assignee_status_activity_core(
+    issues_api: Any,
+    auth: Any,
+    *,
+    users_api: Any,
+    assignee: str,
+    days: int = 5,
+    as_of: str | None = None,
+    status_classes: list[str] | None = None,
+    max_issues: int = 2_000,
+) -> dict[str, Any]:
+    """List assigned issues whose status intervals overlap a recent period."""
+    wanted = set(status_classes or ["closed", "in_progress", "testing"])
+    allowed = {"closed", "in_progress", "testing"}
+    reporting_contract = {
+        "closed_semantics": "transition into a final/closed status inside the period",
+        "active_semantics": "in_progress/testing status interval overlaps the period",
+        "assignee_semantics": "current assignee equals the resolved user",
+        "report_only_returned_issues": True,
+        "do_not_call_followup_search_tools": True,
+        "do_not_use_terminal_or_raw_api": True,
+    }
+
+    def result(status: str, **extra: Any) -> dict[str, Any]:
+        payload = {
+            "status": status,
+            "query": {
+                "assignee": assignee,
+                "status_classes": sorted(wanted),
+                "days": days,
+                "as_of": as_of,
+            },
+            "issues": [],
+            "counts": {},
+            "coverage": {"complete": False, "reason": "request did not complete"},
+            "reporting_contract": reporting_contract,
+        }
+        payload.update(extra)
+        return _cap_rows_for_budget(payload, "issues")
+
+    if not isinstance(assignee, str) or not assignee.strip() or len(assignee) > 128:
+        return result("invalid_request", error="assignee must contain 1..128 characters")
+    if not wanted or not wanted <= allowed:
+        return result(
+            "invalid_request",
+            error="status_classes may contain only closed, in_progress, testing",
+        )
+    if not 1 <= max_issues <= 10_000:
+        return result("invalid_request", error="max_issues must be between 1 and 10000")
+    try:
+        period_from, period_to = _parse_activity_period(days, as_of)
+    except ValueError as exc:
+        return result("invalid_request", error=str(exc))
+
+    try:
+        resolution = await resolve_assignee_core(users_api, auth, assignee.strip())
+    except Exception as exc:
+        return result("upstream_error", error=type(exc).__name__)
+    resolution_status = resolution.get("status")
+    if resolution_status == "ambiguous":
+        candidates = [
+            {"login": user.login, "display": user.display or _user_display_name(user)}
+            for user in resolution.get("candidates") or []
+        ]
+        return result(
+            "ambiguous_assignee",
+            error="assignee matches several users; call again with the exact login",
+            candidates=candidates,
+        )
+    if resolution_status == "not_found":
+        return result("user_not_found", error="assignee could not be resolved")
+    if resolution_status != "resolved" or not resolution.get("login"):
+        return result("invalid_request", error=resolution.get("reason") or "invalid assignee")
+    login = str(resolution["login"])
+
+    fields = [
+        "key", "summary", "status", "statusType", "queue", "updatedAt", "assignee",
+    ]
+    issues_by_key: dict[str, Issue] = {}
+    pages_fetched = 0
+    try:
+        for page_number in range(1, _ASSIGNEE_ACTIVITY_MAX_PAGES + 1):
+            batch = await issues_api.issues_find_filter(
+                {"assignee": [login]},
+                fields=fields,
+                per_page=_ASSIGNEE_ACTIVITY_PAGE_SIZE,
+                page=page_number,
+                auth=auth,
+            )
+            pages_fetched += 1
+            for issue in batch:
+                if issue.key:
+                    issues_by_key.setdefault(issue.key, issue)
+            if len(issues_by_key) > max_issues:
+                return result(
+                    "limit_exceeded",
+                    error=f"assignee has more than max_issues={max_issues}",
+                    counts={"assigned_scanned": len(issues_by_key)},
+                )
+            if len(batch) < _ASSIGNEE_ACTIVITY_PAGE_SIZE:
+                break
+        else:
+            return result(
+                "partial",
+                error="assignee issue pagination ceiling reached",
+                counts={"assigned_scanned": len(issues_by_key)},
+                coverage={"complete": False, "reason": "pagination ceiling reached"},
+            )
+    except Exception as exc:
+        return result("upstream_error", error=type(exc).__name__)
+
+    semaphore = asyncio.Semaphore(_ASSIGNEE_ACTIVITY_CONCURRENCY)
+
+    async def load_changes(
+        issue: Issue,
+    ) -> tuple[Issue, list[dict[str, object]] | Exception, bool]:
+        # ``updatedAt`` covers every issue mutation, including status changes.
+        # If it predates the reporting window, no transition can fall inside
+        # the window. The current status below is enough to decide whether an
+        # in-progress/testing interval spans the whole window; an old final
+        # status is deliberately not treated as a recent closure.
+        updated_at = getattr(issue, "updated_at", None)
+        if updated_at is not None and _to_utc(updated_at) <= period_from:
+            return issue, [], False
+        async with semaphore:
+            try:
+                changes = await issues_api.issue_get_status_changelog(issue.key, auth=auth)
+                return issue, changes, True
+            except Exception as exc:  # preserve per-issue coverage instead of inventing rows
+                return issue, exc, True
+
+    loaded = await asyncio.gather(*(load_changes(issue) for issue in issues_by_key.values()))
+    rows: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    class_counts: Counter[str] = Counter()
+    changelogs_scanned = 0
+    changelogs_skipped_by_updated_at = 0
+    for issue, raw_changes, was_scanned in loaded:
+        if was_scanned:
+            changelogs_scanned += 1
+        else:
+            changelogs_skipped_by_updated_at += 1
+        if isinstance(raw_changes, Exception):
+            failures.append({"key": issue.key or "", "error": type(raw_changes).__name__})
+            continue
+        events: list[dict[str, Any]] = []
+        for change in raw_changes:
+            changed_at = _parse_changelog_time(change.get("updatedAt"))
+            if changed_at is None:
+                continue
+            for changed in change.get("fields", []):
+                if not isinstance(changed, dict):
+                    continue
+                field = changed.get("field") or {}
+                if not isinstance(field, dict) or (field.get("id") != "status" and field.get("key") != "status"):
+                    continue
+                from_key, from_display = _status_value(changed.get("from"))
+                to_key, to_display = _status_value(changed.get("to"))
+                events.append(
+                    {
+                        "at": changed_at,
+                        "from": {"key": from_key, "display": from_display},
+                        "to": {"key": to_key, "display": to_display},
+                        "from_class": _activity_status_class(from_key, from_display),
+                        "to_class": _activity_status_class(to_key, to_display),
+                    }
+                )
+        events.sort(key=lambda event: event["at"])
+
+        state_class: str | None = None
+        state_value: dict[str, Any] | None = None
+        for event in events:
+            if event["at"] > period_from:
+                if state_value is None:
+                    state_class = event["from_class"]
+                    state_value = event["from"]
+                break
+            state_class = event["to_class"]
+            state_value = event["to"]
+        if state_value is None:
+            current_key, current_display = _status_value(issue.status)
+            state_class = _activity_status_class(
+                current_key,
+                current_display,
+                status_type_key=_reference_key(getattr(issue, "statusType", None)),
+            )
+            state_value = {"key": current_key, "display": current_display}
+
+        matched_classes: set[str] = set()
+        evidence: list[dict[str, Any]] = []
+        if state_class in {"in_progress", "testing"} and state_class in wanted:
+            matched_classes.add(state_class)
+            evidence.append(
+                {
+                    "kind": "active_at_period_start",
+                    "class": state_class,
+                    "status": state_value,
+                    "at": period_from.isoformat(),
+                }
+            )
+        for event in events:
+            if not (period_from < event["at"] <= period_to):
+                continue
+            target_class = event["to_class"]
+            if target_class in wanted:
+                matched_classes.add(target_class)
+                evidence.append(
+                    {
+                        "kind": "status_transition",
+                        "class": target_class,
+                        "from": event["from"],
+                        "to": event["to"],
+                        "at": event["at"].isoformat(),
+                    }
+                )
+        if not matched_classes:
+            continue
+        for status_class in matched_classes:
+            class_counts[status_class] += 1
+        updated_at = getattr(issue, "updated_at", None)
+        assignee_ref = getattr(issue, "assignee", None)
+        rows.append(
+            {
+                "key": issue.key,
+                "summary": issue.summary,
+                "queue": _reference_key(getattr(issue, "queue", None)),
+                "assignee": {
+                    "id": getattr(assignee_ref, "id", None),
+                    "display": _reference_display(assignee_ref),
+                },
+                "current_status": _reference_display(issue.status),
+                "matched_classes": sorted(matched_classes),
+                "activity": evidence,
+                "updated_at": updated_at.isoformat() if hasattr(updated_at, "isoformat") else updated_at,
+                "url": f"https://tracker.yandex.ru/{issue.key}",
+            }
+        )
+
+    rows.sort(key=lambda row: (row["activity"][-1]["at"], row["key"]), reverse=True)
+    complete = not failures
+    payload = result(
+        "ok" if rows else "no_matches",
+        query={
+            "assignee": login,
+            "resolved_by": resolution.get("method"),
+            "period_from": period_from.isoformat(),
+            "period_to": period_to.isoformat(),
+            "status_classes": sorted(wanted),
+        },
+        issues=rows,
+        counts={
+            "assigned_total": len(issues_by_key),
+            "changelogs_scanned": changelogs_scanned - len(failures),
+            "changelogs_skipped_by_updated_at": changelogs_skipped_by_updated_at,
+            "matched_issues": len(rows),
+            "by_class": dict(sorted(class_counts.items())),
+        },
+        coverage={
+            "complete": complete,
+            "reason": None if complete else "some changelogs failed",
+            "pages_fetched": pages_fetched,
+            "failed_changelogs": failures,
+        },
+    )
+    return payload
+
+
 _OVERDUE_PAGE_SIZE = 100
 _OVERDUE_MAX_PAGES = 100
 
@@ -1781,6 +2120,79 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             updated_before=updated_before,
             page=page,
             per_page=per_page,
+        )
+
+    @mcp.tool(
+        title="List Recent Status Activity for an Assignee",
+        description=(
+            "ONE-SHOT exhaustive read-only tool for requests such as: "
+            "'найди все задачи, закрытые или бывшие в работе/тестировании "
+            "за последние 5 дней, исполнитель Иванов'. Resolves the assignee, "
+            "fetches both open and closed assigned issues, exhaustively scans each "
+            "status changelog with bounded concurrency, and returns evidence-backed "
+            "closed/in_progress/testing activity for the rolling period. Queue-specific "
+            "Russian and English status names are mapped to semantic classes. Closed "
+            "means a transition into a final status inside the period; in-progress and "
+            "testing mean the status interval overlapped the period. Use this tool once "
+            "and report its rows, counts, and coverage verbatim. NEVER follow it with "
+            "issues_assigned_open, issues_find, issues_count, issue_get, worklogs, tool "
+            "search, terminal, resources, prompts, or raw API calls. If coverage is "
+            "partial, report the stated reason and stop."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    async def issues_list_assignee_status_activity(
+        ctx: Context[Any, AppContext],
+        assignee: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=128,
+                description="Assignee name, login, or email (for example: Иванов)",
+            ),
+        ],
+        days: Annotated[
+            int,
+            Field(
+                ge=1,
+                le=31,
+                description="Rolling lookback in 24-hour days; default 5",
+            ),
+        ] = 5,
+        as_of: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional ISO date/datetime ending the period. Omit for now. "
+                    "A date includes that complete UTC day."
+                )
+            ),
+        ] = None,
+        status_classes: Annotated[
+            list[Literal["closed", "in_progress", "testing"]] | None,
+            Field(
+                min_length=1,
+                max_length=3,
+                description=(
+                    "Semantic classes to include; defaults to closed, in_progress, testing"
+                ),
+            ),
+        ] = None,
+        max_issues: Annotated[
+            int,
+            Field(ge=1, le=10_000, description="Safety ceiling for assigned issues"),
+        ] = 2_000,
+    ) -> dict[str, Any]:
+        app = ctx.request_context.lifespan_context
+        return await issues_list_assignee_status_activity_core(
+            app.issues,
+            get_yandex_auth(ctx),
+            users_api=app.users,
+            assignee=assignee,
+            days=days,
+            as_of=as_of,
+            status_classes=list(status_classes) if status_classes is not None else None,
+            max_issues=max_issues,
         )
 
     @mcp.tool(

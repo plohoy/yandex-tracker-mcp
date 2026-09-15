@@ -29,6 +29,7 @@ READ_ONLY_TOOL_NAMES = [
     # Issue aggregation / statistics tools (10, fork additions)
     "issues_analyze_description_field",
     "issues_assigned_open",
+    "issues_list_assignee_status_activity",
     "issues_count_current_sprint_status",
     "issues_count_queue_status",
     "issues_count_release_status_returns",
