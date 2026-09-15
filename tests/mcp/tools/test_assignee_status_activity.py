@@ -99,6 +99,10 @@ async def test_historical_intervals_and_recent_closure_are_distinguished():
     assert rows["TEST-2"]["matched_classes"] == ["testing"]
     assert rows["TEST-3"]["matched_classes"] == ["in_progress", "testing"]
     assert api.changelog_calls == 4
+    contract = result["reporting_contract"]
+    assert contract["copy_issue_key_and_summary_verbatim"] is True
+    assert contract["never_abbreviate_or_ellipsis_summary"] is True
+    assert "changelogs_skipped_by_updated_at" in contract["coverage_statement"]
 
 
 async def test_unknown_status_class_fails_closed():

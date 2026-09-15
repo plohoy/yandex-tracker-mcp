@@ -1140,6 +1140,14 @@ async def issues_list_assignee_status_activity_core(
         "active_semantics": "in_progress/testing status interval overlaps the period",
         "assignee_semantics": "current assignee equals the resolved user",
         "report_only_returned_issues": True,
+        "copy_issue_key_and_summary_verbatim": True,
+        "never_abbreviate_or_ellipsis_summary": True,
+        "coverage_statement": (
+            "Report assigned_total, changelogs_scanned, "
+            "changelogs_skipped_by_updated_at, failed changelog count, and "
+            "coverage.complete verbatim; never say every changelog was scanned "
+            "when some were safely skipped by updatedAt"
+        ),
         "do_not_call_followup_search_tools": True,
         "do_not_use_terminal_or_raw_api": True,
     }
@@ -2137,7 +2145,12 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "and report its rows, counts, and coverage verbatim. NEVER follow it with "
             "issues_assigned_open, issues_find, issues_count, issue_get, worklogs, tool "
             "search, terminal, resources, prompts, or raw API calls. If coverage is "
-            "partial, report the stated reason and stop."
+            "partial, report the stated reason and stop. Copy every issue key and "
+            "full summary verbatim: never shorten a summary with an ellipsis. "
+            "Coverage must explicitly state assigned_total, changelogs_scanned, "
+            "changelogs_skipped_by_updated_at, failed changelogs, and "
+            "coverage.complete; never claim that all changelogs were scanned when "
+            "the updatedAt optimization skipped some."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
