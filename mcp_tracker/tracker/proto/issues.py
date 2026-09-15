@@ -107,6 +107,12 @@ class IssueProtocol(Protocol):
         *,
         auth: YandexAuth | None = None,
     ) -> list[dict[str, object]]: ...
+    async def issue_get_changelog(
+        self,
+        issue_id: str,
+        *,
+        auth: YandexAuth | None = None,
+    ) -> list[dict[str, object]]: ...
     async def issue_get_worklogs(
         self, issue_id: str, *, auth: YandexAuth | None = None
     ) -> list[Worklog]: ...

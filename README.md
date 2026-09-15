@@ -47,6 +47,12 @@ intentionally stays on 0.7.1 because the runtime integration depends on
   fields in descriptions
 - `issues_assigned_open` / `issues_created_open` — open issues by person with
   deterministic name resolution
+- `issues_list_assignee_status_activity` — one-shot historical report for a
+  named assignee: issues closed, in progress, or in testing during a rolling
+  period, with status-transition evidence and complete coverage
+- `issues_list_stale_assignee_work_statuses` — one-shot current-status SLA
+  report for a named assignee; finds issues remaining in `in_progress`,
+  `testing`, or `needs_info` for more than 8 business hours by default
 
 **New tools (6, in `metrics.py` — QA-lead metrics, grouped by focus area):**
 
@@ -82,6 +88,13 @@ intentionally stays on 0.7.1 because the runtime integration depends on
 | `дисциплина данных` | `issues_metrics_data_discipline(queue? — org-wide, stale_days)` |
 | `переносы спринтов` | `issues_metrics_sprint_carryover(queue?, board_id?)` |
 | `залежавшиеся у X` | `issues_assigned_open(assignee, updated_before=2 месяца)` |
+| `найди все задачи X, закрытые или бывшие в работе или тестировании за последние N дней` | `issues_list_assignee_status_activity(assignee=X, days=N)` — one call |
+| `найди все задачи X, которые долго не меняли рабочие статусы` | `issues_list_stale_assignee_work_statuses(assignee=X)` — one call; «долго» = более 8 рабочих часов |
+
+For the stale-work-status alias, working time is Monday–Friday, 09:00–18:00
+`Europe/Moscow`. The timer starts at the later of entry into the current
+status and assignment to the current person. `needs_info` is returned as an
+external-wait category rather than attributed to the assignee as a delay.
 
 **Agent-harness behaviour notes** — this fork is hardened for LLM agents
 driving the server through a harness (Hermes, Claude Code, custom loops), not
@@ -149,7 +162,8 @@ just for manual tool use:
   stale-issue queries filter server-side BEFORE the size cap, so rows are
   never lost to capping (`coverage.open_after_filter` / `filtered_out`).
 - Tracker client: `fields` selector support, `boards_get_all`,
-  `board_get_sprints`, `issues_find_filter`, `issue_get_status_changelog`
+  `board_get_sprints`, `issues_find_filter`, `issue_get_status_changelog`, and
+  complete `issue_get_changelog` for status/assignee SLA reconstruction
   (cached) plus matching protocol stubs.
 - Pagination guidance rewritten: prefer aggregate tools over manual page
   loops and free-form YQL; schemas prescribe positive flows (page 1 → N,

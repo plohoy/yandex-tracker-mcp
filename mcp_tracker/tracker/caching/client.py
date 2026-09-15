@@ -269,6 +269,15 @@ def make_cached_protocols(
             )
 
         @cached(**cache_config)
+        async def issue_get_changelog(
+            self,
+            issue_id: str,
+            *,
+            auth: YandexAuth | None = None,
+        ) -> list[dict[str, object]]:
+            return await self._original.issue_get_changelog(issue_id, auth=auth)
+
+        @cached(**cache_config)
         async def issue_get_worklogs(
             self, issue_id: str, *, auth: YandexAuth | None = None
         ) -> list[Worklog]:

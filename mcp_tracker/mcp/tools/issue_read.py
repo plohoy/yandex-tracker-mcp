@@ -11,6 +11,7 @@ import tempfile
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo
 
 from mcp.server import FastMCP
 from mcp.server.fastmcp import Context
@@ -1064,6 +1065,11 @@ _ACTIVITY_CLOSED_RE = re.compile(
     r"closed|done|resolved|cancelled|canceled)$",
     re.IGNORECASE,
 )
+_ACTIVITY_NEEDS_INFO_RE = re.compile(
+    r"^(?:требуется|нужна|необходима).*(?:информация|информации)|"
+    r"^(?:needs?|requires?|waiting for).*(?:info|information)$",
+    re.IGNORECASE,
+)
 
 
 def _parse_activity_period(days: int, as_of: str | None) -> tuple[datetime, datetime]:
@@ -1111,6 +1117,8 @@ def _activity_status_class(
         return "closed"
     if any(_ACTIVITY_CLOSED_RE.fullmatch(part) for part in candidates):
         return "closed"
+    if any(_ACTIVITY_NEEDS_INFO_RE.search(part) for part in candidates):
+        return "needs_info"
     if any(_QA_READY_STATUS_RE.search(part) or _QA_ACTIVE_STATUS_RE.fullmatch(part) for part in candidates):
         return "testing"
     if any(_ACTIVITY_IN_PROGRESS_RE.fullmatch(part) for part in candidates):
@@ -1394,6 +1402,315 @@ async def issues_list_assignee_status_activity_core(
         },
     )
     return payload
+
+
+_STALE_WORK_STATUS_CLASSES = frozenset({"in_progress", "testing", "needs_info"})
+_STALE_WORK_TIMEZONE = ZoneInfo("Europe/Moscow")
+_STALE_WORKDAY_START_HOUR = 9
+_STALE_WORKDAY_END_HOUR = 18
+
+
+def _business_seconds_between(start: datetime, end: datetime) -> float:
+    """Count Mon-Fri 09:00-18:00 time in Europe/Moscow."""
+    local_start = _to_utc(start).astimezone(_STALE_WORK_TIMEZONE)
+    local_end = _to_utc(end).astimezone(_STALE_WORK_TIMEZONE)
+    if local_end <= local_start:
+        return 0.0
+    total = 0.0
+    cursor = local_start.date()
+    while cursor <= local_end.date():
+        if cursor.weekday() < 5:
+            window_start = datetime(
+                cursor.year,
+                cursor.month,
+                cursor.day,
+                _STALE_WORKDAY_START_HOUR,
+                tzinfo=_STALE_WORK_TIMEZONE,
+            )
+            window_end = window_start.replace(hour=_STALE_WORKDAY_END_HOUR)
+            overlap_start = max(local_start, window_start)
+            overlap_end = min(local_end, window_end)
+            if overlap_end > overlap_start:
+                total += (overlap_end - overlap_start).total_seconds()
+        cursor += timedelta(days=1)
+    return total
+
+
+def _changelog_field_id(changed: object) -> str | None:
+    if not isinstance(changed, dict):
+        return None
+    field = changed.get("field") or {}
+    if not isinstance(field, dict):
+        return None
+    value = field.get("id") or field.get("key")
+    return str(value).casefold() if value is not None else None
+
+
+def _reference_tokens(value: object) -> set[str]:
+    if not isinstance(value, dict):
+        return set()
+    return {
+        str(raw).strip().casefold()
+        for key in ("id", "uid", "login", "key", "display")
+        if (raw := value.get(key)) is not None and str(raw).strip()
+    }
+
+
+async def issues_list_stale_assignee_work_statuses_core(
+    issues_api: Any,
+    auth: Any,
+    *,
+    users_api: Any,
+    assignee: str,
+    stale_business_hours: float = 8.0,
+    as_of: str | None = None,
+    max_issues: int = 2_000,
+) -> dict[str, Any]:
+    """List current assigned work statuses unchanged beyond a business-time SLA."""
+    contract = {
+        "working_status_classes": ["in_progress", "testing", "needs_info"],
+        "long_definition": "strictly more than stale_business_hours",
+        "timer_start": "later of current-status entry and current-assignee assignment",
+        "business_calendar": "Monday-Friday, 09:00-18:00 Europe/Moscow",
+        "needs_info_is_external_wait": True,
+        "copy_issue_key_and_summary_verbatim": True,
+        "one_shot_no_followup_tools": True,
+    }
+
+    def response(status: str, **extra: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": status,
+            "query": {
+                "assignee": assignee,
+                "stale_business_hours": stale_business_hours,
+                "as_of": as_of,
+            },
+            "issues": [],
+            "counts": {},
+            "coverage": {"complete": False, "reason": "request did not complete"},
+            "reporting_contract": contract,
+        }
+        payload.update(extra)
+        return _cap_rows_for_budget(payload, "issues")
+
+    if not isinstance(assignee, str) or not assignee.strip() or len(assignee) > 128:
+        return response("invalid_request", error="assignee must contain 1..128 characters")
+    if not 0 < stale_business_hours <= 1_000:
+        return response(
+            "invalid_request", error="stale_business_hours must be greater than 0 and at most 1000"
+        )
+    if not 1 <= max_issues <= 10_000:
+        return response("invalid_request", error="max_issues must be between 1 and 10000")
+    try:
+        if as_of is None:
+            now = datetime.now(timezone.utc)
+        else:
+            now = _to_utc(datetime.fromisoformat(as_of.strip().replace("Z", "+00:00")))
+    except (TypeError, ValueError):
+        return response("invalid_request", error="as_of must be an ISO datetime")
+
+    try:
+        resolution = await resolve_assignee_core(users_api, auth, assignee.strip())
+    except Exception as exc:
+        return response("upstream_error", error=type(exc).__name__)
+    resolution_status = resolution.get("status")
+    if resolution_status == "ambiguous":
+        return response(
+            "ambiguous_assignee",
+            error="assignee matches several users; call again with the exact login",
+            candidates=[
+                {"login": user.login, "display": user.display or _user_display_name(user)}
+                for user in resolution.get("candidates") or []
+            ],
+        )
+    if resolution_status == "not_found":
+        return response("user_not_found", error="assignee could not be resolved")
+    if resolution_status != "resolved" or not resolution.get("login"):
+        return response(
+            "invalid_request", error=resolution.get("reason") or "invalid assignee"
+        )
+    login = str(resolution["login"])
+    resolved_user = resolution.get("user")
+    assignee_tokens = {
+        str(value).strip().casefold()
+        for value in (
+            login,
+            getattr(resolved_user, "uid", None),
+            getattr(resolved_user, "id", None),
+        )
+        if value is not None and str(value).strip()
+    }
+
+    fields = [
+        "key", "summary", "status", "statusType", "queue", "createdAt", "updatedAt", "assignee",
+    ]
+    issues_by_key: dict[str, Issue] = {}
+    pages_fetched = 0
+    try:
+        for page_number in range(1, _ASSIGNEE_ACTIVITY_MAX_PAGES + 1):
+            batch = await issues_api.issues_find_filter(
+                {"assignee": [login]},
+                fields=fields,
+                per_page=_ASSIGNEE_ACTIVITY_PAGE_SIZE,
+                page=page_number,
+                auth=auth,
+            )
+            pages_fetched += 1
+            for issue in batch:
+                if issue.key:
+                    issues_by_key.setdefault(issue.key, issue)
+            if len(issues_by_key) > max_issues:
+                return response(
+                    "limit_exceeded",
+                    error=f"assignee has more than max_issues={max_issues}",
+                    counts={"assigned_scanned": len(issues_by_key)},
+                )
+            if len(batch) < _ASSIGNEE_ACTIVITY_PAGE_SIZE:
+                break
+        else:
+            return response(
+                "partial",
+                error="assignee issue pagination ceiling reached",
+                counts={"assigned_scanned": len(issues_by_key)},
+                coverage={"complete": False, "reason": "pagination ceiling reached"},
+            )
+    except Exception as exc:
+        return response("upstream_error", error=type(exc).__name__)
+
+    candidates: list[tuple[Issue, str]] = []
+    current_class_counts: Counter[str] = Counter()
+    for issue in issues_by_key.values():
+        status_key, status_display = _status_value(issue.status)
+        status_class = _activity_status_class(
+            status_key,
+            status_display,
+            status_type_key=_reference_key(getattr(issue, "statusType", None)),
+        )
+        if status_class in _STALE_WORK_STATUS_CLASSES:
+            candidates.append((issue, status_class))
+            current_class_counts[status_class] += 1
+
+    semaphore = asyncio.Semaphore(_ASSIGNEE_ACTIVITY_CONCURRENCY)
+
+    async def inspect_issue(
+        issue: Issue, status_class: str
+    ) -> tuple[Issue, str, list[dict[str, object]] | Exception]:
+        async with semaphore:
+            try:
+                changes = await issues_api.issue_get_changelog(issue.key, auth=auth)
+                return issue, status_class, changes
+            except Exception as exc:
+                return issue, status_class, exc
+
+    inspected = await asyncio.gather(
+        *(inspect_issue(issue, status_class) for issue, status_class in candidates)
+    )
+    rows: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    stale_class_counts: Counter[str] = Counter()
+    for issue, status_class, raw_changes in inspected:
+        if isinstance(raw_changes, Exception):
+            failures.append({"key": issue.key or "", "error": type(raw_changes).__name__})
+            continue
+        status_key, status_display = _status_value(issue.status)
+        status_since: datetime | None = None
+        assigned_since: datetime | None = None
+        for change in raw_changes:
+            changed_at = _parse_changelog_time(change.get("updatedAt"))
+            if changed_at is None or changed_at > now:
+                continue
+            for changed in change.get("fields", []):
+                field_id = _changelog_field_id(changed)
+                if field_id == "status":
+                    to_key, to_display = _status_value(changed.get("to"))
+                    same_status = bool(
+                        (status_key and to_key and status_key.casefold() == to_key.casefold())
+                        or (
+                            status_display
+                            and to_display
+                            and status_display.casefold() == to_display.casefold()
+                        )
+                    )
+                    if same_status and (status_since is None or changed_at > status_since):
+                        status_since = changed_at
+                elif field_id == "assignee":
+                    if assignee_tokens & _reference_tokens(changed.get("to")):
+                        if assigned_since is None or changed_at > assigned_since:
+                            assigned_since = changed_at
+
+        created_at = getattr(issue, "created_at", None)
+        created_at = _to_utc(created_at) if created_at is not None else None
+        status_source = "status_transition"
+        assignment_source = "assignee_transition"
+        if status_since is None:
+            status_since = created_at
+            status_source = "created_at_fallback"
+        if assigned_since is None:
+            assigned_since = created_at
+            assignment_source = "created_at_fallback"
+        known_starts = [value for value in (status_since, assigned_since) if value is not None]
+        if not known_starts:
+            failures.append({"key": issue.key or "", "error": "missing_timer_start"})
+            continue
+        timer_started_at = max(known_starts)
+        business_seconds = _business_seconds_between(timer_started_at, now)
+        business_hours = business_seconds / 3600
+        if business_hours <= stale_business_hours:
+            continue
+        stale_class_counts[status_class] += 1
+        assignee_ref = getattr(issue, "assignee", None)
+        rows.append(
+            {
+                "key": issue.key,
+                "summary": issue.summary,
+                "queue": _reference_key(getattr(issue, "queue", None)),
+                "assignee": {
+                    "id": getattr(assignee_ref, "id", None),
+                    "display": _reference_display(assignee_ref),
+                },
+                "status": {"key": status_key, "display": status_display},
+                "status_class": status_class,
+                "is_external_wait": status_class == "needs_info",
+                "status_since": status_since.isoformat() if status_since else None,
+                "status_since_source": status_source,
+                "assigned_since": assigned_since.isoformat() if assigned_since else None,
+                "assigned_since_source": assignment_source,
+                "timer_started_at": timer_started_at.isoformat(),
+                "business_hours_in_status": round(business_hours, 2),
+                "overdue_business_hours": round(business_hours - stale_business_hours, 2),
+                "url": f"https://tracker.yandex.ru/{issue.key}",
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (row["business_hours_in_status"], row["key"]), reverse=True
+    )
+    complete = not failures
+    return response(
+        "ok" if rows else "no_matches",
+        query={
+            "assignee": login,
+            "resolved_by": resolution.get("method"),
+            "stale_business_hours": stale_business_hours,
+            "as_of": now.isoformat(),
+            "working_status_classes": sorted(_STALE_WORK_STATUS_CLASSES),
+        },
+        issues=rows,
+        counts={
+            "assigned_total": len(issues_by_key),
+            "current_work_status_total": len(candidates),
+            "current_by_class": dict(sorted(current_class_counts.items())),
+            "stale_total": len(rows),
+            "stale_by_class": dict(sorted(stale_class_counts.items())),
+            "changelogs_scanned": len(candidates) - len(failures),
+        },
+        coverage={
+            "complete": complete,
+            "reason": None if complete else "some changelogs or timer starts failed",
+            "pages_fetched": pages_fetched,
+            "failed_issues": failures,
+        },
+    )
 
 
 _OVERDUE_PAGE_SIZE = 100
@@ -2205,6 +2522,61 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             days=days,
             as_of=as_of,
             status_classes=list(status_classes) if status_classes is not None else None,
+            max_issues=max_issues,
+        )
+
+    @mcp.tool(
+        title="List Stale Work Statuses for an Assignee",
+        description=(
+            "ONE-SHOT tool for natural requests such as 'найди все задачи "
+            "Иванова, которые долго не меняли рабочие статусы'. Resolves the "
+            "assignee and returns only their CURRENT issues in semantic statuses "
+            "in_progress, testing, or needs_info that have remained there for "
+            "strictly more than 8 business hours by default. Business time is "
+            "Monday-Friday 09:00-18:00 Europe/Moscow. The timer starts at the later "
+            "of entry into the current status and assignment to the current person. "
+            "needs_info is reported separately as external waiting, not blamed on the "
+            "assignee. Use exactly once; copy full keys/titles and counts verbatim, "
+            "report coverage, then stop. Never follow with issue search/get, worklogs, "
+            "tool search, terminal, resources, prompts, browser, or raw API calls."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    async def issues_list_stale_assignee_work_statuses(
+        ctx: Context[Any, AppContext],
+        assignee: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=128,
+                description="Assignee surname, full name, login, or email",
+            ),
+        ],
+        stale_business_hours: Annotated[
+            float,
+            Field(
+                gt=0,
+                le=1_000,
+                description="Long-status threshold in business hours; default 8",
+            ),
+        ] = 8.0,
+        as_of: Annotated[
+            str | None,
+            Field(description="Optional ISO datetime; omit to use current time"),
+        ] = None,
+        max_issues: Annotated[
+            int,
+            Field(ge=1, le=10_000, description="Safety ceiling for assigned issues"),
+        ] = 2_000,
+    ) -> dict[str, Any]:
+        app = ctx.request_context.lifespan_context
+        return await issues_list_stale_assignee_work_statuses_core(
+            app.issues,
+            get_yandex_auth(ctx),
+            users_api=app.users,
+            assignee=assignee,
+            stale_business_hours=stale_business_hours,
+            as_of=as_of,
             max_issues=max_issues,
         )
 

@@ -684,6 +684,32 @@ class TrackerClient(QueuesProtocol, IssueProtocol, GlobalDataProtocol, UsersProt
             params = None
         return result
 
+    async def issue_get_changelog(
+        self,
+        issue_id: str,
+        *,
+        auth: YandexAuth | None = None,
+    ) -> list[dict[str, object]]:
+        """Return the complete unfiltered issue changelog with pagination."""
+        url: str | Any = f"v3/issues/{issue_id}/changelog"
+        params: dict[str, object] | None = {"perPage": 100}
+        result: list[dict[str, object]] = []
+        while url:
+            _status, body, links = await self._request_retry(
+                "get",
+                url,
+                headers=await self._build_headers(auth),
+                params=params,
+            )
+            page = json.loads(body)
+            if not isinstance(page, list):
+                raise ValueError("Tracker changelog response is not a list")
+            result.extend(page)
+            next_link = links.get("next")
+            url = next_link["url"] if next_link else ""
+            params = None
+        return result
+
     async def issue_get_worklogs(
         self, issue_id: str, *, auth: YandexAuth | None = None
     ) -> list[Worklog]:
