@@ -103,6 +103,107 @@ def _stem_candidates(boards: list[dict[str, Any]], queue: str) -> list[dict[str,
     return out[:10]
 
 
+def _board_name_matches(name: object, query: str) -> bool:
+    """Case-insensitive partial match in BOTH directions.
+
+    A sprint or board name in a user request is usually longer than the board
+    name («Product QA Sprint 25» vs board «Product QA Sprint») and a queue key is
+    usually shorter («YOURQUEUE» vs board «Product Sprint»), so a match counts when
+    either normalized string contains the other.
+    """
+    board = " ".join(str(name or "").casefold().split())
+    needle = " ".join(query.casefold().split())
+    return bool(board) and bool(needle) and (needle in board or board in needle)
+
+
+def _board_rows(boards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"id": board.get("id"), "name": board.get("name")} for board in boards]
+
+
+async def _resolve_board(
+    issues_api: Any,
+    auth: Any,
+    *,
+    queue: str | None,
+    board_name: str | None,
+    board_id: int | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[dict[str, Any]] | None]:
+    """Resolve the sprint board from board_id, a board name or a queue key.
+
+    Returns ``(board, error_payload, boards)``: on success ``error_payload`` is
+    None; on failure ``board`` is None and the caller returns ``error_payload``
+    verbatim. ``boards`` is the fetched board catalogue (None when board_id was
+    supplied), reused for candidate lists by the callers.
+    """
+    if board_id is not None:
+        return {"id": board_id, "name": None}, None, None
+    boards = await issues_api.boards_get_all(auth=auth)
+    all_boards = _board_rows(boards)
+    if board_name:
+        matches = [b for b in boards if _board_name_matches(b.get("name"), board_name)]
+        if len(matches) == 1:
+            return matches[0], None, boards
+        return (
+            None,
+            {
+                "status": "ambiguous_board" if matches else "board_not_found",
+                "complete": False,
+                "board_name": board_name,
+                "candidate_boards": _board_rows(matches),
+                "all_boards": all_boards,
+                "required_action": (
+                    "Pass board_id from candidate_boards, or pass sprint_id / "
+                    "sprint_ids to address sprints directly. Do not guess a board."
+                ),
+            },
+            boards,
+        )
+    if queue is None:
+        return (
+            None,
+            {
+                "status": "board_not_found",
+                "complete": False,
+                "queue": None,
+                "board_name": None,
+                "candidate_boards": [],
+                "all_boards": all_boards,
+                "required_action": (
+                    "Name the queue, pass board_name (part of the board or "
+                    "product name), or pass sprint_id to resolve one sprint "
+                    "directly."
+                ),
+            },
+            boards,
+        )
+    needle = f" {queue.casefold()} "
+    candidates = [
+        board
+        for board in boards
+        if needle in f" {str(board.get('name', '')).casefold()} "
+    ]
+    if len(candidates) == 1:
+        return candidates[0], None, boards
+    return (
+        None,
+        {
+            "status": "ambiguous_board" if candidates else "board_not_found",
+            "complete": False,
+            "queue": queue,
+            "candidate_boards": _board_rows(candidates),
+            "stem_candidate_boards": _stem_candidates(boards, queue),
+            "all_boards": all_boards,
+            "required_action": (
+                "Show candidate_boards and stem_candidate_boards and ask for "
+                "board_id (org sprint boards are often named after the product, "
+                "not the queue key), or pass sprint_id to resolve one sprint "
+                "directly. Do not guess."
+            ),
+        },
+        boards,
+    )
+
+
 def _sprint_row(sprint: dict[str, Any]) -> dict[str, Any]:
     """Normalise a Tracker sprint object for tool output."""
     board = sprint.get("board")
@@ -347,6 +448,11 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "(draft / in_progress / archived), plus the id of the current sprint. "
             "Use it for «какие спринты есть в очереди X», «список спринтов доски», "
             "«какой спринт сейчас идёт», «найди спринт по номеру/дате», before "
+            "When the user gives only a sprint or board NAME (for example «дай "
+            "информацию по спринту Product QA Sprint 25»), pass board_name with "
+            "that name — the tool matches it against board names in both "
+            "directions and lists the board's sprints in ONE call; never invent a "
+            "queue key out of a sprint name. "
             "calling issues_metrics_sprint_results or issues_metrics_sprint_history "
             "(they need sprint ids). Board resolution is by queue key matched "
             "against board names: board_not_found (with all_boards), "
@@ -378,7 +484,23 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ] = None,
         board_id: Annotated[
             int | None,
-            Field(gt=0, description="Explicit board id; otherwise resolved by queue"),
+            Field(
+                gt=0,
+                description="Explicit board id; otherwise resolved by board_name or queue",
+            ),
+        ] = None,
+        board_name: Annotated[
+            str | None,
+            Field(
+                max_length=128,
+                description=(
+                    "Part of the board or product name as the user wrote it "
+                    "(for example a sprint title such as 'Product QA Sprint 25' "
+                    "matches the board 'Product QA Sprint'); matched in both "
+                    "directions, case-insensitively. Use it instead of inventing "
+                    "a queue key when the user names a sprint/board only."
+                ),
+            ),
         ] = None,
         sprint_id: Annotated[
             int | None,
@@ -441,51 +563,17 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             }
         if queue is not None and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
             raise ValueError("queue must be a Yandex Tracker queue key")
-        boards: list[dict[str, Any]] | None = None
-        if board_id is None:
-            boards = await issues_api.boards_get_all(auth=auth)
-            all_boards = [
-                {"id": board.get("id"), "name": board.get("name")} for board in boards
-            ]
-            if queue is None:
-                return {
-                    "status": "board_not_found",
-                    "complete": False,
-                    "queue": None,
-                    "candidate_boards": [],
-                    "all_boards": all_boards,
-                    "required_action": (
-                        "Name the queue or pass board_id, or pass sprint_id to "
-                        "resolve one sprint directly."
-                    ),
-                }
-            needle = f" {queue.casefold()} "
-            candidates = [
-                board
-                for board in boards
-                if needle in f" {str(board.get('name', '')).casefold()} "
-            ]
-            if len(candidates) != 1:
-                return {
-                    "status": "ambiguous_board" if candidates else "board_not_found",
-                    "complete": False,
-                    "queue": queue,
-                    "candidate_boards": [
-                        {"id": board.get("id"), "name": board.get("name")}
-                        for board in candidates
-                    ],
-                    "stem_candidate_boards": _stem_candidates(boards, queue),
-                    "all_boards": all_boards,
-                    "required_action": (
-                        "Show candidate_boards and stem_candidate_boards and ask "
-                        "for board_id (org sprint boards are often named after the "
-                        "product, not the queue key), or pass sprint_id to resolve "
-                        "one sprint directly. Do not guess."
-                    ),
-                }
-            board = candidates[0]
-        else:
-            board = {"id": board_id, "name": None}
+        board, error, boards = await _resolve_board(
+            issues_api,
+            auth,
+            queue=queue,
+            board_name=board_name,
+            board_id=board_id,
+        )
+        if error is not None:
+            return error
+        if board is None:  # pragma: no cover - helper contract
+            return {"status": "board_not_found", "complete": False}
         try:
             sprints = await issues_api.board_get_sprints(
                 _as_int(board["id"]), auth=auth
@@ -719,7 +807,8 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "MULTI-SPRINT analytics in ONE call: use for «аналитика по нескольким "
             "прошедшим спринтам», «сравни спринты», «динамика по спринтам», "
             "«сколько задач выполнялось в последних спринтах», «тренд "
-            "выполнения/план-факт по спринтам очереди X». Scope: pass queue or "
+            "выполнения/план-факт по спринтам очереди X». Scope: pass queue, "
+            "board_name (part of the board/product name as the user wrote it) or "
             "board_id to take the board's last N started sprints (newest first, "
             "the in-progress one included unless include_current=false), or pass "
             "explicit sprint_ids for any depth/spread. Each sprint is scanned "
@@ -734,10 +823,11 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "last_n small (default 5) and max_issues modest or the 300s client "
             "timeout can cut the call; retry the same call with fewer sprints "
             "instead of splitting the work across tools. Board resolution by "
-            "queue follows the same rules as issues_list_sprints "
+            "queue/board_name follows the same rules as issues_list_sprints "
             "(board_not_found / ambiguous_board with candidate_boards and "
             "stem_candidate_boards / board_without_sprints — org sprint boards "
-            "are named after the product, not the queue key). This is NOT release and "
+            "are named after the product, not the queue key; never invent a "
+            "queue key out of a board name). This is NOT release and "
             "NOT per-issue history: for version_id use the release tools, for "
             "status-change evidence use issues_list_assignee_status_activity."
         ),
@@ -756,7 +846,22 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         ] = None,
         board_id: Annotated[
             int | None,
-            Field(gt=0, description="Explicit board id; otherwise resolved by queue"),
+            Field(
+                gt=0,
+                description="Explicit board id; otherwise resolved by board_name or queue",
+            ),
+        ] = None,
+        board_name: Annotated[
+            str | None,
+            Field(
+                max_length=128,
+                description=(
+                    "Part of the board or product name as the user wrote it "
+                    "(matched in both directions, case-insensitively); use it "
+                    "instead of inventing a queue key when the user names a "
+                    "board/product only."
+                ),
+            ),
         ] = None,
         sprint_ids: Annotated[
             list[int] | None,
@@ -817,49 +922,17 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                     )
         else:
             mode = "board_last_n"
-            if board_id is None:
-                boards = await issues_api.boards_get_all(auth=auth)
-                all_boards = [
-                    {"id": item.get("id"), "name": item.get("name")} for item in boards
-                ]
-                if queue is None:
-                    return {
-                        "status": "board_not_found",
-                        "complete": False,
-                        "queue": None,
-                        "candidate_boards": [],
-                        "all_boards": all_boards,
-                        "required_action": (
-                            "Name the queue, pass board_id, or pass sprint_ids."
-                        ),
-                    }
-                needle = f" {queue.casefold()} "
-                candidates = [
-                    item
-                    for item in boards
-                    if needle in f" {str(item.get('name', '')).casefold()} "
-                ]
-                if len(candidates) != 1:
-                    return {
-                        "status": "ambiguous_board"
-                        if candidates
-                        else "board_not_found",
-                        "complete": False,
-                        "queue": queue,
-                        "candidate_boards": [
-                            {"id": item.get("id"), "name": item.get("name")}
-                            for item in candidates
-                        ],
-                        "stem_candidate_boards": _stem_candidates(boards, queue),
-                        "all_boards": all_boards,
-                        "required_action": (
-                            "Show candidate_boards and stem_candidate_boards and "
-                            "ask for board_id (org sprint boards are often named "
-                            "after the product, not the queue key), or pass "
-                            "sprint_ids. Do not guess."
-                        ),
-                    }
-                board = candidates[0]
+            board, error, boards = await _resolve_board(
+                issues_api,
+                auth,
+                queue=queue,
+                board_name=board_name,
+                board_id=board_id,
+            )
+            if error is not None:
+                return error
+            if board is None:  # pragma: no cover - helper contract
+                return {"status": "board_not_found", "complete": False}
             try:
                 sprints = await issues_api.board_get_sprints(
                     _as_int(board["id"]), auth=auth

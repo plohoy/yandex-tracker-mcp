@@ -136,6 +136,53 @@ class TestListSprints:
         assert content["status"] == "ambiguous_board"
         assert len(content["candidate_boards"]) == 2
 
+    async def test_board_name_longer_than_board_resolves_in_one_call(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        """A sprint title names the board: board_name resolves and lists sprints."""
+        mock_issues_protocol.boards_get_all = AsyncMock(
+            return_value=[
+                {"id": 179, "name": "Product QA Sprint"},
+                {"id": 47, "name": "Unrelated"},
+            ]
+        )
+        mock_issues_protocol.board_get_sprints = AsyncMock(
+            return_value=[
+                _sprint(
+                    552,
+                    name="Product QA Sprint 25",
+                    start="2026-09-03",
+                    end="2026-09-16",
+                )
+            ]
+        )
+
+        result = await client_session.call_tool(
+            "issues_list_sprints",
+            {"board_name": "Product QA Sprint 25 (03.09 - 16.09)", "limit": 30},
+        )
+
+        content = get_tool_result_content(result)
+        assert content["status"] == "complete"
+        assert content["board_id"] == 179
+        assert [row["id"] for row in content["sprints"]] == [552]
+
+    async def test_board_name_without_match_returns_catalog(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        mock_issues_protocol.boards_get_all = AsyncMock(
+            return_value=[{"id": 1, "name": "Something Else"}]
+        )
+
+        result = await client_session.call_tool(
+            "issues_list_sprints", {"board_name": "No Such Board"}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["status"] == "board_not_found"
+        assert content["board_name"] == "No Such Board"
+        assert content["all_boards"] == [{"id": 1, "name": "Something Else"}]
+
     async def test_board_without_sprints_offers_stem_candidates(
         self, client_session: ClientSession, mock_issues_protocol: AsyncMock
     ) -> None:
@@ -485,6 +532,37 @@ class TestSprintHistory:
         content = get_tool_result_content(result)
         assert content["status"] == "board_without_sprints"
         assert len(content["candidate_boards"]) == 2
+
+    async def test_board_name_resolves_history_scope(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        today = date.today()
+        mock_issues_protocol.boards_get_all = AsyncMock(
+            return_value=[{"id": 179, "name": "Product QA Sprint"}]
+        )
+        mock_issues_protocol.board_get_sprints = AsyncMock(
+            return_value=[
+                _sprint(
+                    552,
+                    name="Product QA Sprint 25",
+                    start=(today - timedelta(days=14)).isoformat(),
+                    end=(today - timedelta(days=1)).isoformat(),
+                )
+            ]
+        )
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            return_value=[_issue("TEST-1", status_type="done")]
+        )
+
+        result = await client_session.call_tool(
+            "issues_metrics_sprint_history",
+            {"board_name": "Product QA Sprint 25", "last_n": 1},
+        )
+
+        content = get_tool_result_content(result)
+        assert content["status"] == "complete"
+        assert content["board_id"] == 179
+        assert [row["id"] for row in content["per_sprint"]] == [552]
 
     async def test_ambiguous_board_returns_candidates(
         self, client_session: ClientSession, mock_issues_protocol: AsyncMock
