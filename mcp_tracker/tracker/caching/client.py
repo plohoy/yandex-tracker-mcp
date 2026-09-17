@@ -240,6 +240,12 @@ def make_cached_protocols(
             return await self._original.board_get_sprints(board_id, auth=auth)
 
         @cached(**cache_config)
+        async def sprint_get(
+            self, sprint_id: int, *, auth: YandexAuth | None = None
+        ) -> dict[str, object]:
+            return await self._original.sprint_get(sprint_id, auth=auth)
+
+        @cached(**cache_config)
         async def issues_find_filter(
             self,
             filters: dict[str, object],

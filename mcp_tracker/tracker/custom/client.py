@@ -15,7 +15,7 @@ from pydantic import BaseModel, RootModel
 from yandex.cloud.iam.v1.iam_token_service_pb2 import CreateIamTokenRequest
 from yandex.cloud.iam.v1.iam_token_service_pb2_grpc import IamTokenServiceStub
 
-from mcp_tracker.tracker.custom.errors import IssueNotFound
+from mcp_tracker.tracker.custom.errors import IssueNotFound, SprintNotFound
 from mcp_tracker.tracker.proto.common import YandexAuth
 from mcp_tracker.tracker.proto.fields import GlobalDataProtocol
 from mcp_tracker.tracker.proto.issues import IssueProtocol
@@ -634,6 +634,21 @@ class TrackerClient(QueuesProtocol, IssueProtocol, GlobalDataProtocol, UsersProt
             payload = await response.json()
             if not isinstance(payload, list):
                 raise ValueError("Tracker board sprints response is not a list")
+            return payload
+
+    async def sprint_get(
+        self, sprint_id: int, *, auth: YandexAuth | None = None
+    ) -> dict[str, object]:
+        """Return one sprint by id — works at any depth and resolves its board."""
+        async with self._session.get(
+            f"v3/sprints/{sprint_id}", headers=await self._build_headers(auth)
+        ) as response:
+            if response.status == 404:
+                raise SprintNotFound(sprint_id)
+            response.raise_for_status()
+            payload = await response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Tracker sprint response is not an object")
             return payload
 
     async def issues_find_filter(

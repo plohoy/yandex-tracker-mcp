@@ -92,6 +92,9 @@ class IssueProtocol(Protocol):
     async def board_get_sprints(
         self, board_id: int, *, auth: YandexAuth | None = None
     ) -> list[dict[str, object]]: ...
+    async def sprint_get(
+        self, sprint_id: int, *, auth: YandexAuth | None = None
+    ) -> dict[str, object]: ...
     async def issues_find_filter(
         self,
         filters: dict[str, object],

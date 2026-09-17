@@ -74,6 +74,24 @@ intentionally stays on 0.7.1 because the runtime integration depends on
 - `issues_metrics_sprint_carryover` — carried-over issues between the two
   most recent sprints (board resolution, ambiguous → candidates)
 
+**New tools (3, in `sprints.py` — board sprints at any depth):**
+
+- `issues_list_sprints` — sprint catalogue / resolver: with `sprint_id` it
+  resolves that exact sprint at ANY depth (works for a pasted
+  `?sprint=<id>` link and returns its board, dates and state); with
+  `queue`/`board_id` it lists every sprint of the board, newest first, with
+  states (`draft` / `in_progress` / `archived`) and the current sprint id
+- `issues_metrics_sprint_results` — one sprint (any depth): issues total,
+  done (statusType done/cancelled), remaining, per-status and per-status-type
+  distributions, per-queue split, plan hours (sum of `estimation`), fact hours
+  (sum of `spent`), a per-assignee breakdown and a PRE-BUILT markdown table
+  `Очередь | Номер Задачи | Статус | Исполнитель | План часов | Факт часов`
+- `issues_metrics_sprint_history` — multi-sprint analytics in one call: the
+  board's last N started sprints (or explicit `sprint_ids`), per-sprint
+  figures + aggregates (issues/done/remaining/plan/fact/average completion,
+  plan-vs-fact ratio) and a pre-built `history_table`; per-sprint failures are
+  isolated as `sprint_error`
+
 **Dashboard aliases (short commands for the agent / ready-to-paste):**
 
 | Alias | Expands to |
@@ -93,43 +111,60 @@ intentionally stays on 0.7.1 because the runtime integration depends on
 | `сколько задач текущего спринта в статусе X` | `issues_count_current_sprint_status(queue, status, board_id?)` — ONE status count for the CURRENT sprint; `queue` and `status` (exact displayed name) are both REQUIRED, and there is no sprint-id parameter |
 | `QA-задачи, чей спринт закончился до даты X` | `issues_list_qa_workset(queues, sprint_ended_before=<date>)` — `queues` is required; `sprint_ended_before` is an exclusive cutoff on a RESOLVED sprint end date, not a sprint id |
 | `задачи X за последние N дней (закрытые, в работе, в тестировании)` | `issues_list_assignee_status_activity(assignee=X, days=N, status_classes?=[closed,in_progress,testing])` — ONE call per person; for 2+ people call it once per person, never fan out into `issue_get` |
-| `результаты спринта X с планом/фактом` / ссылка `sprint=<id>` | NOT COVERED — no tool accepts a sprint id; see the sprint-work note below and answer honestly instead of looping `issue_get` or opening a browser |
+| `результаты спринта X` / `план-факт по спринту` / ссылка `sprint=<id>` | `issues_metrics_sprint_results(sprint_id)` — one call, any depth; resolves the sprint itself, no board needed |
+| `какие спринты есть в очереди X` / `какой спринт сейчас идёт` / `найди спринт по номеру` | `issues_list_sprints(queue?/board_id?/sprint_id?, limit, include_future)` — catalogue or single-sprint resolver |
+| `аналитика по нескольким прошедшим спринтам` / `сравни спринты` / `тренд выполнения по спринтам` | `issues_metrics_sprint_history(queue?/board_id?/sprint_ids?, last_n, include_current)` — one call, per-sprint rows + aggregates |
 | `залежавшиеся у X` | `issues_assigned_open(assignee, updated_before=2 месяца)` |
 | `найди все задачи X, закрытые или бывшие в работе или тестировании за последние N дней` | `issues_list_assignee_status_activity(assignee=X, days=N)` — one call |
 | `найди все задачи X, которые долго не меняли рабочие статусы` | `issues_list_stale_assignee_work_statuses(assignee=X)` — one call; «долго» = более 8 рабочих часов |
 | `найди залежавшиеся задачи у исполнителей: X, Y, Z` | `issues_list_stale_assignees_work_statuses(assignees=[X,Y,Z])` — one batch call, never fan out |
 
 **Sprint-work requests: covered vs not covered.** A board sprint is not a
-release version: no tool in this surface accepts a sprint id, and `issues_find`
-(whose query language could filter `"Sprint": <id>`) is excluded in the agent
-runtime. Covered today:
+release version. Sprints are addressed directly now: `sprint_get` resolves any
+sprint id through `GET v3/sprints/{id}`, and issue scans pass the structured
+`{"filter": {"sprint": [id]}}` body (the BARE `{"sprint": [...]}` body is
+silently ignored by Tracker and returns the whole org — never send it).
+Covered:
 
-- ONE status count for the board's CURRENT sprint — `issues_count_current_sprint_status(queue, status, board_id?)` (`queue` and the exact displayed `status` are required);
-- QA issues whose resolved sprint ended before a date — `issues_list_qa_workset(queues, sprint_ended_before=<date>)` (`queues` required; this is a date cutoff, not a sprint id);
-- carryover between the two most recent sprints — `issues_metrics_sprint_carryover(queue?, board_id?, all_queues?)`;
-- one person's closed / in-progress / in-testing activity over a rolling period (≤31 days) with transition evidence — `issues_list_assignee_status_activity(assignee, days, status_classes?)`.
+- a sprint id from a URL such as `https://tracker.yandex.ru/issues/?sprint=<id>` —
+  `issues_list_sprints(sprint_id=<id>)` resolves it (board, name, dates, state);
+- «результаты спринта, план/факт по часам, выполнено/осталось, по исполнителям» —
+  `issues_metrics_sprint_results(sprint_id)`, one call with a pre-built
+  per-issue table;
+- «список спринтов очереди/доски», «какой спринт сейчас идёт», any depth —
+  `issues_list_sprints(queue?/board_id?)`;
+- «аналитика/тренд по нескольким спринтам» — `issues_metrics_sprint_history`
+  (`last_n` or explicit `sprint_ids`);
+- sprint states and carryover for a board — `issues_metrics_sprint_carryover`;
+- ONE status count of the board's CURRENT sprint —
+  `issues_count_current_sprint_status(queue, status, board_id?)`;
+- QA issues whose resolved sprint ended before a date —
+  `issues_list_qa_workset(queues, sprint_ended_before=<date>)`.
+
+Board resolution by queue matches the queue key against board NAMES, and org
+sprint boards are named after the product, not the queue key: an unmatched or
+sprint-less board returns `board_not_found` / `ambiguous_board` (with
+`candidate_boards` and `stem_candidate_boards`) or `board_without_sprints`
+(the matched board carries no sprints) — ask for a `board_id` from those
+candidates, or pass `sprint_id`/`sprint_ids` and skip board resolution
+altogether.
 
 Not covered (report the gap; do not improvise):
 
-- a sprint id from a URL such as `https://tracker.yandex.ru/issues/?sprint=<id>` —
-  nothing accepts a sprint id: the status-count tool covers only the CURRENT
-  sprint of a resolvable board, the workset takes a date cutoff, and carryover
-  only compares a board's two latest sprints. Do not open a browser (the
-  Tracker web login is CAPTCHA-protected) and do not loop `issue_get`;
-- «результаты спринта, план/факт по часам, выполнено/осталось, по исполнителям» —
-  no sprint-scoped issue list and no per-sprint `estimation`/`spent` totals
-  (`issues_summarize_effort` is epic/release-scoped);
 - «возвраты в спринте» — returns are version-scoped
   (`issues_count_release_status_returns`, `issues_count_release_returns_by_name`),
   never sprint-scoped;
 - multi-assignee status activity with plan/fact hours — the activity tool is
   single-assignee and carries no hour columns; the only batch tool is the
-  stale-work-status one.
+  stale-work-status one;
+- per-sprint worklogs or status-change evidence — the sprint tools report
+  `estimation`/`spent` totals only.
 
 An uncovered request is answered with the partial data that IS available plus
 an explicit statement of the missing capability — never by looping `issue_get`
 over a key range (that path exhausts the iteration budget and produces no
-history).
+history) and never by opening the Tracker web UI (its login is
+CAPTCHA-protected).
 
 For the stale-work-status alias, working time is Monday–Friday, 09:00–18:00
 `Europe/Moscow`. The timer starts at the later of entry into the current

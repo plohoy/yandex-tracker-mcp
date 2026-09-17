@@ -6,6 +6,8 @@ This package organizes MCP tools by category:
 - field.py: Global field and metadata tools (read-only)
 - issue_read.py: Issue read-only tools
 - issue_write.py: Issue write tools (conditional on read-only mode)
+- metrics.py: QA-lead metrics tools
+- sprints.py: board-sprint catalogue, results and history analytics
 - user.py: User-related tools (read-only)
 """
 
@@ -19,6 +21,7 @@ from mcp_tracker.mcp.tools.issue_write import register_issue_write_tools
 from mcp_tracker.mcp.tools.metrics import register_metrics_tools
 from mcp_tracker.mcp.tools.queue import register_queue_tools
 from mcp_tracker.mcp.tools.queue_write import register_queue_write_tools
+from mcp_tracker.mcp.tools.sprints import register_sprint_tools
 from mcp_tracker.mcp.tools.user import register_user_tools
 from mcp_tracker.settings import Settings
 
@@ -36,6 +39,7 @@ def register_all_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     register_field_tools(settings, mcp)
     register_issue_read_tools(settings, mcp)
     register_metrics_tools(settings, mcp)
+    register_sprint_tools(settings, mcp)
     register_user_tools(settings, mcp)
 
     # Only register write tools if not in read-only mode

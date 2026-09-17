@@ -50,6 +50,10 @@ READ_ONLY_TOOL_NAMES = [
     "issues_metrics_data_discipline",
     "issues_metrics_sprint_carryover",
     "issues_metrics_qa_dashboard",
+    # Sprint tools (3, fork additions)
+    "issues_list_sprints",
+    "issues_metrics_sprint_results",
+    "issues_metrics_sprint_history",
     # User tools (4)
     "users_get_all",
     "users_search",
