@@ -31,6 +31,7 @@ READ_ONLY_TOOL_NAMES = [
     "issues_assigned_open",
     "issues_list_assignee_status_activity",
     "issues_list_stale_assignee_work_statuses",
+    "issues_list_stale_assignees_work_statuses",
     "issues_count_current_sprint_status",
     "issues_count_queue_status",
     "issues_count_release_status_returns",

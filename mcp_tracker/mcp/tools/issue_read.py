@@ -27,7 +27,11 @@ from mcp_tracker.mcp.params import (
     YTQuery,
 )
 from mcp_tracker.mcp.tools._access import check_issue_access, check_queue_access
-from mcp_tracker.mcp.tools.user import _user_display_name, resolve_assignee_core
+from mcp_tracker.mcp.tools.user import (
+    _drain_user_catalog,
+    _user_display_name,
+    resolve_assignee_core,
+)
 from mcp_tracker.mcp.utils import get_yandex_auth, set_non_needed_fields_null
 from mcp_tracker.settings import Settings
 from mcp_tracker.tracker.proto.types.issues import (
@@ -1447,12 +1451,17 @@ def _changelog_field_id(changed: object) -> str | None:
 
 
 def _reference_tokens(value: object) -> set[str]:
-    if not isinstance(value, dict):
-        return set()
+    if isinstance(value, dict):
+        values = (value.get(key) for key in ("id", "uid", "login", "key", "display"))
+    else:
+        values = (
+            getattr(value, key, None)
+            for key in ("id", "uid", "login", "key", "display")
+        )
     return {
         str(raw).strip().casefold()
-        for key in ("id", "uid", "login", "key", "display")
-        if (raw := value.get(key)) is not None and str(raw).strip()
+        for raw in values
+        if raw is not None and str(raw).strip()
     }
 
 
@@ -1709,6 +1718,335 @@ async def issues_list_stale_assignee_work_statuses_core(
             "reason": None if complete else "some changelogs or timer starts failed",
             "pages_fetched": pages_fetched,
             "failed_issues": failures,
+        },
+    )
+
+
+async def issues_list_stale_assignees_work_statuses_core(
+    issues_api: Any,
+    auth: Any,
+    *,
+    users_api: Any,
+    assignees: list[str],
+    stale_business_hours: float = 8.0,
+    as_of: str | None = None,
+    max_issues: int = 10_000,
+) -> dict[str, Any]:
+    """Batch stale-status report with one user-catalog and issue scan."""
+    contract = {
+        "batch_semantics": "one catalogue load and one multi-assignee issue scan",
+        "working_status_classes": ["in_progress", "testing", "needs_info"],
+        "needs_info_is_external_wait": True,
+        "copy_issue_key_and_summary_verbatim": True,
+        "group_by_resolved_assignee": True,
+        "one_shot_no_followup_tools": True,
+    }
+
+    def response(status: str, **extra: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": status,
+            "query": {
+                "assignees": assignees,
+                "stale_business_hours": stale_business_hours,
+                "as_of": as_of,
+            },
+            "issues": [],
+            "assignee_results": [],
+            "unresolved_assignees": [],
+            "counts": {},
+            "coverage": {"complete": False, "reason": "request did not complete"},
+            "reporting_contract": contract,
+        }
+        payload.update(extra)
+        return _cap_rows_for_budget(payload, "issues", "assignee_results")
+
+    if not isinstance(assignees, list) or not 1 <= len(assignees) <= 50:
+        return response("invalid_request", error="assignees must contain 1..50 names")
+    cleaned = [" ".join(value.split()) for value in assignees if isinstance(value, str)]
+    if len(cleaned) != len(assignees) or any(
+        not value or len(value) > 128 for value in cleaned
+    ):
+        return response(
+            "invalid_request", error="each assignee must contain 1..128 characters"
+        )
+    if len({value.casefold() for value in cleaned}) != len(cleaned):
+        return response(
+            "invalid_request", error="assignees must not contain duplicates"
+        )
+    if not 0 < stale_business_hours <= 1_000:
+        return response(
+            "invalid_request",
+            error="stale_business_hours must be greater than 0 and at most 1000",
+        )
+    if not 1 <= max_issues <= 50_000:
+        return response(
+            "invalid_request", error="max_issues must be between 1 and 50000"
+        )
+    try:
+        if as_of is None:
+            common_as_of = datetime.now(timezone.utc).isoformat()
+        else:
+            common_as_of = _to_utc(
+                datetime.fromisoformat(as_of.strip().replace("Z", "+00:00"))
+            ).isoformat()
+    except (TypeError, ValueError):
+        return response("invalid_request", error="as_of must be an ISO datetime")
+
+    try:
+        catalog = await _drain_user_catalog(users_api, auth)
+    except Exception as exc:
+        return response("upstream_error", error=type(exc).__name__)
+
+    class CatalogUsers:
+        async def users_list(
+            self, per_page: int = 100, page: int = 1, *, auth: Any = None
+        ) -> list[Any]:
+            start = (page - 1) * per_page
+            return catalog[start : start + per_page]
+
+    catalog_users = CatalogUsers()
+    resolved: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for requested in cleaned:
+        resolution = await resolve_assignee_core(catalog_users, auth, requested)
+        if resolution.get("status") == "resolved" and resolution.get("login"):
+            resolved.append(
+                {
+                    "requested": requested,
+                    "login": str(resolution["login"]),
+                    "method": resolution.get("method"),
+                    "user": resolution.get("user"),
+                }
+            )
+        elif resolution.get("status") == "ambiguous":
+            unresolved.append(
+                {
+                    "requested": requested,
+                    "status": "ambiguous_assignee",
+                    "candidates": [
+                        {
+                            "login": user.login,
+                            "display": user.display or _user_display_name(user),
+                        }
+                        for user in resolution.get("candidates") or []
+                    ],
+                }
+            )
+        else:
+            unresolved.append(
+                {
+                    "requested": requested,
+                    "status": (
+                        "user_not_found"
+                        if resolution.get("status") == "not_found"
+                        else "invalid_request"
+                    ),
+                    "reason": resolution.get("reason"),
+                }
+            )
+    if not resolved:
+        return response(
+            "unresolved_assignees",
+            unresolved_assignees=unresolved,
+            counts={"requested_assignees": len(cleaned), "resolved_assignees": 0},
+            coverage={"complete": False, "reason": "no assignee could be resolved"},
+        )
+
+    logins = [item["login"] for item in resolved]
+    fields = [
+        "key",
+        "summary",
+        "status",
+        "statusType",
+        "queue",
+        "createdAt",
+        "updatedAt",
+        "assignee",
+    ]
+    all_issues: dict[str, Issue] = {}
+    pages_fetched = 0
+    try:
+        for page_number in range(1, 501):
+            batch = await issues_api.issues_find_filter(
+                {"assignee": logins},
+                fields=fields,
+                per_page=_ASSIGNEE_ACTIVITY_PAGE_SIZE,
+                page=page_number,
+                auth=auth,
+            )
+            pages_fetched += 1
+            for issue in batch:
+                if issue.key:
+                    all_issues.setdefault(issue.key, issue)
+            if len(all_issues) > max_issues:
+                return response(
+                    "limit_exceeded",
+                    error=f"batch has more than max_issues={max_issues}",
+                    unresolved_assignees=unresolved,
+                    counts={"assigned_scanned": len(all_issues)},
+                )
+            if len(batch) < _ASSIGNEE_ACTIVITY_PAGE_SIZE:
+                break
+        else:
+            return response(
+                "partial",
+                error="batch issue pagination ceiling reached",
+                unresolved_assignees=unresolved,
+                counts={"assigned_scanned": len(all_issues)},
+                coverage={"complete": False, "reason": "pagination ceiling reached"},
+            )
+    except Exception as exc:
+        return response(
+            "upstream_error", error=type(exc).__name__, unresolved_assignees=unresolved
+        )
+
+    token_to_login: dict[str, str] = {}
+    for item in resolved:
+        user = item["user"]
+        first = str(getattr(user, "first_name", None) or "").strip()
+        last = str(getattr(user, "last_name", None) or "").strip()
+        tokens = {
+            str(value).strip().casefold()
+            for value in (
+                item["login"],
+                getattr(user, "uid", None),
+                getattr(user, "id", None),
+                getattr(user, "display", None),
+                f"{first} {last}".strip(),
+                f"{last} {first}".strip(),
+            )
+            if value is not None and str(value).strip()
+        }
+        for token in tokens:
+            token_to_login[token] = item["login"]
+
+    grouped: dict[str, list[Issue]] = {item["login"]: [] for item in resolved}
+    ungrouped_keys: list[str] = []
+    for issue in all_issues.values():
+        issue_tokens = _reference_tokens(getattr(issue, "assignee", None))
+        matched_logins = {
+            token_to_login[token] for token in issue_tokens if token in token_to_login
+        }
+        if len(matched_logins) == 1:
+            grouped[matched_logins.pop()].append(issue)
+        else:
+            ungrouped_keys.append(issue.key or "")
+
+    shared_semaphore = asyncio.Semaphore(_ASSIGNEE_ACTIVITY_CONCURRENCY)
+    changelog_cache: dict[str, list[dict[str, object]]] = {}
+
+    class PrefetchedIssues:
+        def __init__(self, login: str):
+            self.login = login
+
+        async def issues_find_filter(
+            self,
+            filters: dict[str, object],
+            *,
+            fields: list[str] | None = None,
+            per_page: int = 100,
+            page: int = 1,
+            auth: Any = None,
+        ) -> list[Issue]:
+            rows = grouped[self.login]
+            start = (page - 1) * per_page
+            return rows[start : start + per_page]
+
+        async def issue_get_changelog(
+            self, issue_id: str, *, auth: Any = None
+        ) -> list[dict[str, object]]:
+            if issue_id in changelog_cache:
+                return changelog_cache[issue_id]
+            async with shared_semaphore:
+                changes = await issues_api.issue_get_changelog(issue_id, auth=auth)
+            changelog_cache[issue_id] = changes
+            return changes
+
+    async def run_person(item: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        person_result = await issues_list_stale_assignee_work_statuses_core(
+            PrefetchedIssues(item["login"]),
+            auth,
+            users_api=catalog_users,
+            assignee=item["login"],
+            stale_business_hours=stale_business_hours,
+            as_of=common_as_of,
+            max_issues=max(1, len(grouped[item["login"]]) + 1),
+        )
+        return item, person_result
+
+    person_results = await asyncio.gather(*(run_person(item) for item in resolved))
+    rows: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+    all_complete = not ungrouped_keys
+    for item, person_result in person_results:
+        person_rows = person_result.get("issues") or []
+        for row in person_rows:
+            row["requested_assignee"] = item["requested"]
+            row["resolved_login"] = item["login"]
+            rows.append(row)
+        person_coverage = person_result.get("coverage") or {}
+        all_complete = all_complete and bool(person_coverage.get("complete"))
+        summaries.append(
+            {
+                "requested": item["requested"],
+                "login": item["login"],
+                "resolved_by": item["method"],
+                "assigned_total": len(grouped[item["login"]]),
+                "current_work_status_total": (person_result.get("counts") or {}).get(
+                    "current_work_status_total", 0
+                ),
+                "stale_total": len(person_rows),
+                "stale_by_class": (person_result.get("counts") or {}).get(
+                    "stale_by_class", {}
+                ),
+                "coverage_complete": bool(person_coverage.get("complete")),
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            row.get("resolved_login") or "",
+            -(row.get("business_hours_in_status") or 0),
+            row.get("key") or "",
+        )
+    )
+    status = "ok"
+    reasons: list[str] = []
+    if unresolved:
+        status = "partial"
+        reasons.append("some assignees were unresolved")
+        all_complete = False
+    if ungrouped_keys:
+        status = "partial"
+        reasons.append("some returned issues could not be mapped to one assignee")
+    if not all_complete and status == "ok":
+        status = "partial"
+        reasons.append("some per-assignee scans were incomplete")
+    return response(
+        status if rows else ("no_matches" if all_complete else status),
+        query={
+            "assignees": cleaned,
+            "resolved_logins": logins,
+            "stale_business_hours": stale_business_hours,
+            "as_of": common_as_of,
+        },
+        issues=rows,
+        assignee_results=summaries,
+        unresolved_assignees=unresolved,
+        counts={
+            "requested_assignees": len(cleaned),
+            "resolved_assignees": len(resolved),
+            "unresolved_assignees": len(unresolved),
+            "assigned_total": len(all_issues),
+            "stale_total": len(rows),
+            "changelogs_scanned": len(changelog_cache),
+        },
+        coverage={
+            "complete": all_complete,
+            "reason": "; ".join(reasons) or None,
+            "catalog_loaded_once": True,
+            "issue_scan_pages": pages_fetched,
+            "ungrouped_issue_keys": ungrouped_keys,
         },
     )
 
@@ -2575,6 +2913,58 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             get_yandex_auth(ctx),
             users_api=app.users,
             assignee=assignee,
+            stale_business_hours=stale_business_hours,
+            as_of=as_of,
+            max_issues=max_issues,
+        )
+
+    @mcp.tool(
+        title="List Stale Work Statuses for Multiple Assignees",
+        description=(
+            "BATCH ONE-SHOT tool for requests naming two or more people, such as "
+            "'найди залежавшиеся задачи у исполнителей: Иванов, Петров, "
+            "Сидоров'. Pass all names unchanged in one assignees array. The server "
+            "loads the user catalogue once, performs one multi-assignee issue scan, "
+            "checks only current in_progress/testing/needs_info tasks, and returns one "
+            "compact table plus per-person summaries and unresolved names. 'Long' "
+            "defaults to strictly more than 8 business hours (Mon-Fri 09:00-18:00 "
+            "Europe/Moscow), timed from the later of status entry or assignment. Use "
+            "this instead of multiple calls to the singular tool. Never fan out, call "
+            "tool_search, generic issue tools, terminal, or any fallback before or "
+            "after it. Copy full keys/titles and counts verbatim, report unresolved "
+            "people and coverage, then stop."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
+    async def issues_list_stale_assignees_work_statuses(
+        ctx: Context[Any, AppContext],
+        assignees: Annotated[
+            list[str],
+            Field(
+                min_length=1,
+                max_length=50,
+                description="Assignee surnames/full names/logins exactly as supplied",
+            ),
+        ],
+        stale_business_hours: Annotated[
+            float,
+            Field(gt=0, le=1_000, description="Threshold; default 8 business hours"),
+        ] = 8.0,
+        as_of: Annotated[
+            str | None,
+            Field(description="Optional ISO datetime; omit to use current time"),
+        ] = None,
+        max_issues: Annotated[
+            int,
+            Field(ge=1, le=50_000, description="Batch safety ceiling"),
+        ] = 10_000,
+    ) -> dict[str, Any]:
+        app = ctx.request_context.lifespan_context
+        return await issues_list_stale_assignees_work_statuses_core(
+            app.issues,
+            get_yandex_auth(ctx),
+            users_api=app.users,
+            assignees=assignees,
             stale_business_hours=stale_business_hours,
             as_of=as_of,
             max_issues=max_issues,

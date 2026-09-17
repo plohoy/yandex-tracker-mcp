@@ -53,6 +53,8 @@ intentionally stays on 0.7.1 because the runtime integration depends on
 - `issues_list_stale_assignee_work_statuses` — one-shot current-status SLA
   report for a named assignee; finds issues remaining in `in_progress`,
   `testing`, or `needs_info` for more than 8 business hours by default
+- `issues_list_stale_assignees_work_statuses` — batch form for 2–50 people;
+  loads the user catalogue once and performs one multi-assignee issue scan
 
 **New tools (6, in `metrics.py` — QA-lead metrics, grouped by focus area):**
 
@@ -90,6 +92,7 @@ intentionally stays on 0.7.1 because the runtime integration depends on
 | `залежавшиеся у X` | `issues_assigned_open(assignee, updated_before=2 месяца)` |
 | `найди все задачи X, закрытые или бывшие в работе или тестировании за последние N дней` | `issues_list_assignee_status_activity(assignee=X, days=N)` — one call |
 | `найди все задачи X, которые долго не меняли рабочие статусы` | `issues_list_stale_assignee_work_statuses(assignee=X)` — one call; «долго» = более 8 рабочих часов |
+| `найди залежавшиеся задачи у исполнителей: X, Y, Z` | `issues_list_stale_assignees_work_statuses(assignees=[X,Y,Z])` — one batch call, never fan out |
 
 For the stale-work-status alias, working time is Monday–Friday, 09:00–18:00
 `Europe/Moscow`. The timer starts at the later of entry into the current
