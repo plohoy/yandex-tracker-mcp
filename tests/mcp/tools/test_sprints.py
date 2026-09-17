@@ -40,6 +40,32 @@ def _issue(
     )
 
 
+def _changelog(*pairs: tuple[str, str | None]) -> list[dict[str, object]]:
+    """Status changelog entries from (from, to) display pairs."""
+    out: list[dict[str, object]] = []
+    for index, (source, target) in enumerate(pairs):
+        out.append(
+            {
+                "updatedAt": f"2026-09-{10 + index:02d}T10:00:00Z",
+                "fields": [
+                    {
+                        "field": {"id": "status"},
+                        "from": {"display": source} if source else None,
+                        "to": {"display": target} if target else None,
+                    }
+                ],
+            }
+        )
+    return out
+
+
+REWORK_CYCLE = _changelog(
+    ("Тестируется", "Провал"),
+    ("Провал", "В работе"),
+    ("В работе", "Тестируется"),
+)
+
+
 def _sprint(
     sprint_id: int,
     *,
@@ -241,6 +267,9 @@ class TestSprintResults:
                 552, name="Sprint 25", start="2026-09-03", end="2026-09-16"
             )
         )
+        mock_issues_protocol.issue_get_status_changelog = AsyncMock(
+            return_value=REWORK_CYCLE
+        )
         mock_issues_protocol.issues_find_filter = AsyncMock(
             return_value=[
                 _issue(
@@ -288,12 +317,115 @@ class TestSprintResults:
         table = content["table"]
         header = table.splitlines()[0]
         assert header == (
-            "| Очередь | Номер Задачи | Статус | Исполнитель | План часов | Факт часов |"
+            "| Очередь | Номер Задачи | Статус | Исполнитель | План часов | Факт часов "
+            "| Количество возвратов |"
         )
-        assert table.splitlines()[1] == "|---|---|---|---|---|---|"
-        assert "| TEST | TEST-1 | Закрыт | Ivan Ivanov | 40 | 24 |" in table
-        assert "| TEST | TEST-3 | Отменён | — | — | — |" in table
+        assert table.splitlines()[1] == "|---|---|---|---|---|---|---|"
+        assert "| TEST | TEST-1 | Закрыт | Ivan Ivanov | 40 | 24 | 1 |" in table
+        assert "| TEST | TEST-3 | Отменён | — | — | — | 1 |" in table
         assert content["coverage"]["table_rows_returned"] == 3
+        # returns come from each issue's status changelog
+        assert content["counts"]["returns_total"] == 3
+        assert content["counts"]["issues_with_returns"] == 3
+        assert content["counts"]["returns_metric"] == "qa_rework_cycle"
+        assert content["coverage"]["returns_scanned"] == 3
+        assert content["coverage"]["returns_skipped"] == 0
+        assert content["coverage"]["returns_failed"] == 0
+
+    async def test_returns_column_marks_unscanned_rows(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        mock_issues_protocol.sprint_get = AsyncMock(return_value=_sprint(1))
+        mock_issues_protocol.issue_get_status_changelog = AsyncMock(
+            return_value=REWORK_CYCLE
+        )
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            return_value=[_issue("TEST-1"), _issue("TEST-2"), _issue("TEST-3")]
+        )
+
+        result = await client_session.call_tool(
+            "issues_metrics_sprint_results", {"sprint_id": 1, "max_return_scans": 1}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["coverage"]["returns_scanned"] == 1
+        assert content["coverage"]["returns_skipped"] == 2
+        assert content["counts"]["returns_total"] == 1
+        rows = {row["key"]: row["returns"] for row in content["rows"]}
+        assert rows == {"TEST-1": 1, "TEST-2": None, "TEST-3": None}
+        table = content["table"]
+        assert "| TEST | TEST-2 | Open | — | — | — | — |" in table
+        assert (
+            "unscanned" in content["coverage"]["returns_note"]
+            or "NOT scanned" in content["coverage"]["returns_note"]
+        )
+
+    async def test_failed_changelog_is_isolated(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        async def changelog(issue_id: str, *, auth: object = None) -> list[dict]:
+            if issue_id == "TEST-2":
+                raise RuntimeError("504")
+            return REWORK_CYCLE
+
+        mock_issues_protocol.sprint_get = AsyncMock(return_value=_sprint(1))
+        mock_issues_protocol.issue_get_status_changelog = AsyncMock(
+            side_effect=changelog
+        )
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            return_value=[_issue("TEST-1"), _issue("TEST-2")]
+        )
+
+        result = await client_session.call_tool(
+            "issues_metrics_sprint_results", {"sprint_id": 1}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["status"] == "complete"
+        assert content["coverage"]["returns_failed"] == 1
+        assert content["coverage"]["returns_scanned"] == 1
+        assert content["counts"]["returns_total"] == 1
+        rows = {row["key"]: row["returns"] for row in content["rows"]}
+        assert rows == {"TEST-1": 1, "TEST-2": None}
+
+    async def test_returns_metric_can_be_switched(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        mock_issues_protocol.sprint_get = AsyncMock(return_value=_sprint(1))
+        # a single Тестируется→Провал transition: 1 for testing_rework, 0 cycles
+        mock_issues_protocol.issue_get_status_changelog = AsyncMock(
+            return_value=_changelog(("Тестируется", "Провал"))
+        )
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            return_value=[_issue("TEST-1", status_type="done")]
+        )
+
+        result = await client_session.call_tool(
+            "issues_metrics_sprint_results",
+            {"sprint_id": 1, "returns_metric": "testing_rework"},
+        )
+
+        content = get_tool_result_content(result)
+        assert content["counts"]["returns_metric"] == "testing_rework"
+        assert content["counts"]["returns_total"] == 1
+        assert content["rows"][0]["returns"] == 1
+
+    async def test_returns_skipped_entirely_when_cap_is_zero(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        mock_issues_protocol.sprint_get = AsyncMock(return_value=_sprint(1))
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            return_value=[_issue("TEST-1")]
+        )
+
+        result = await client_session.call_tool(
+            "issues_metrics_sprint_results", {"sprint_id": 1, "max_return_scans": 0}
+        )
+
+        content = get_tool_result_content(result)
+        assert content["counts"]["returns_metric"] is None
+        assert content["coverage"]["returns_scanned"] == 0
+        assert "| TEST | TEST-1 | Open | — | — | — | — |" in content["table"]
 
     async def test_uncapped_breakdown_is_sorted_by_load(
         self, client_session: ClientSession, mock_issues_protocol: AsyncMock

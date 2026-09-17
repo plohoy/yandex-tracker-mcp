@@ -84,8 +84,15 @@ intentionally stays on 0.7.1 because the runtime integration depends on
 - `issues_metrics_sprint_results` — one sprint (any depth): issues total,
   done (statusType done/cancelled), remaining, per-status and per-status-type
   distributions, per-queue split, plan hours (sum of `estimation`), fact hours
-  (sum of `spent`), a per-assignee breakdown and a PRE-BUILT markdown table
-  `Очередь | Номер Задачи | Статус | Исполнитель | План часов | Факт часов`
+  (sum of `spent`), a per-assignee breakdown, per-issue RETURN counts and a
+  PRE-BUILT markdown table
+  `Очередь | Номер Задачи | Статус | Исполнитель | План часов | Факт часов | Количество возвратов`.
+  Returns come from each issue's status changelog with the same metric
+  semantics as `issues_count_release_status_returns` (`returns_metric`,
+  default `qa_rework_cycle`), fetched 4 in flight and bounded by
+  `max_return_scans`; rows beyond the cap (or with a failed changelog) show
+  `—`, never a silent 0, and are reported in
+  `coverage.returns_scanned/returns_skipped/returns_failed`
 - `issues_metrics_sprint_history` — multi-sprint analytics in one call: the
   board's last N started sprints (or explicit `sprint_ids`), per-sprint
   figures + aggregates (issues/done/remaining/plan/fact/average completion,
@@ -111,7 +118,7 @@ intentionally stays on 0.7.1 because the runtime integration depends on
 | `сколько задач текущего спринта в статусе X` | `issues_count_current_sprint_status(queue, status, board_id?)` — ONE status count for the CURRENT sprint; `queue` and `status` (exact displayed name) are both REQUIRED, and there is no sprint-id parameter |
 | `QA-задачи, чей спринт закончился до даты X` | `issues_list_qa_workset(queues, sprint_ended_before=<date>)` — `queues` is required; `sprint_ended_before` is an exclusive cutoff on a RESOLVED sprint end date, not a sprint id |
 | `задачи X за последние N дней (закрытые, в работе, в тестировании)` | `issues_list_assignee_status_activity(assignee=X, days=N, status_classes?=[closed,in_progress,testing])` — ONE call per person; for 2+ people call it once per person, never fan out into `issue_get` |
-| `результаты спринта X` / `план-факт по спринту` / ссылка `sprint=<id>` | `issues_metrics_sprint_results(sprint_id)` — one call, any depth; resolves the sprint itself, no board needed |
+| `результаты спринта X` / `план-факт по спринту` / `спринт с возвратами` / ссылка `sprint=<id>` | `issues_metrics_sprint_results(sprint_id, returns_metric?, max_return_scans?)` — one call, any depth; resolves the sprint itself and returns the per-issue table with the «Количество возвратов» column |
 | `какие спринты есть в очереди X` / `какой спринт сейчас идёт` / `найди спринт по номеру` | `issues_list_sprints(queue?/board_id?/sprint_id?, limit, include_future)` — catalogue or single-sprint resolver |
 | `аналитика по нескольким прошедшим спринтам` / `сравни спринты` / `тренд выполнения по спринтам` | `issues_metrics_sprint_history(queue?/board_id?/sprint_ids?, last_n, include_current)` — one call, per-sprint rows + aggregates |
 | `залежавшиеся у X` | `issues_assigned_open(assignee, updated_before=2 месяца)` |

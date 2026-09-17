@@ -342,6 +342,156 @@ _SEARCH_LIMIT_MAX = 20
 
 _ASSIGNED_PAGE_SIZE = 100
 _ASSIGNED_MAX_PAGES = 20
+# --- Return metrics (shared by the release-returns tool and the sprint report) ---
+
+# Exact "testing rework" from->to pairs counted as a return by testing_rework.
+_RETURN_DISPLAY_PAIRS: list[dict[str, str]] = [
+    {"from": "Тестируется", "to": "Провал"},
+    {"from": "Можно тестировать", "to": "Ревью"},
+]
+_RETURN_ALLOWED_PAIRS: set[tuple[str, str]] = {
+    (pair["from"].casefold(), pair["to"].casefold()) for pair in _RETURN_DISPLAY_PAIRS
+}
+# Working statuses whose repeat visits repeated_work_status counts.
+_RETURN_WORKING_STATUSES: set[str] = {
+    name.casefold()
+    for name in (
+        "Будем делать",
+        "В работе",
+        "Ревью",
+        "Можно тестировать",
+        "Тестируется",
+        "Провал",
+    )
+}
+
+
+def _changelog_display(value: object) -> str | None:
+    """Display (or key/id) of a changelog reference dict."""
+    if not isinstance(value, dict):
+        return None
+    raw = value.get("display") or value.get("key") or value.get("id")
+    return str(raw) if raw is not None else None
+
+
+def _count_issue_returns(
+    changes: list[dict[str, Any]],
+    metric: str,
+) -> tuple[int, list[dict[str, Any]], dict[str, int]]:
+    """Count returns in ONE issue's status changelog for the given metric.
+
+    Returns ``(count, evidence, transition_counts)``. The metrics mirror the
+    release-returns tool: ``qa_rework_cycle`` counts one complete
+    Тестируется -> Провал -> В работе -> ... -> Тестируется loop, ``testing_rework``
+    counts the exact ``_RETURN_DISPLAY_PAIRS`` transitions, ``repeated_work_status``
+    counts every visit after the first to a working status.
+    """
+    count = 0
+    evidence: list[dict[str, Any]] = []
+    transition_counts: Counter[str] = Counter()
+    visited_work_statuses: Counter[str] = Counter()
+    status_events: list[dict[str, Any]] = []
+    for change in changes:
+        for changed in change.get("fields", []):
+            if not isinstance(changed, dict):
+                continue
+            field = changed.get("field") or {}
+            if not isinstance(field, dict):
+                continue
+            if field.get("id") != "status" and field.get("key") != "status":
+                continue
+            source = _changelog_display(changed.get("from"))
+            target = _changelog_display(changed.get("to"))
+            if source is not None and target is not None:
+                status_events.append(
+                    {
+                        "from": source,
+                        "to": target,
+                        "updated_at": change.get("updatedAt"),
+                    }
+                )
+            if metric == "qa_rework_cycle":
+                continue
+            is_return = False
+            if source is not None and target is not None:
+                if metric == "testing_rework":
+                    is_return = (
+                        source.casefold(),
+                        target.casefold(),
+                    ) in _RETURN_ALLOWED_PAIRS
+                elif target.casefold() in _RETURN_WORKING_STATUSES:
+                    visited_work_statuses[target.casefold()] += 1
+                    is_return = visited_work_statuses[target.casefold()] > 1
+            if is_return:
+                count += 1
+                transition_counts[f"{source} → {target}"] += 1
+                evidence.append(
+                    {
+                        "from": source,
+                        "to": target,
+                        "updated_at": change.get("updatedAt"),
+                    }
+                )
+    if metric == "qa_rework_cycle":
+        # Changelog is normally chronological; sorting also makes the
+        # contract deterministic for synthetic and future API variants.
+        status_events.sort(key=lambda event: str(event.get("updated_at") or ""))
+        phase = "waiting_for_test"
+        cycle_events: list[dict[str, Any]] = []
+        for event in status_events:
+            source = event["from"]
+            target = event["to"]
+            if phase == "waiting_for_test":
+                if source.casefold() == "тестируется" and target.casefold() == "провал":
+                    phase = "failed"
+                    cycle_events = [event]
+                elif target.casefold() == "тестируется":
+                    phase = "testing"
+                    cycle_events = [event]
+            elif phase == "testing":
+                if source.casefold() == "тестируется" and target.casefold() == "провал":
+                    phase = "failed"
+                    cycle_events.append(event)
+                elif target.casefold() == "тестируется":
+                    cycle_events = [event]
+            elif phase == "failed":
+                cycle_events.append(event)
+                if target.casefold() == "в работе":
+                    phase = "rework"
+            elif phase == "rework":
+                cycle_events.append(event)
+                if target.casefold() == "тестируется":
+                    count += 1
+                    name = "Тестируется → Провал → В работе → Тестируется"
+                    transition_counts[name] += 1
+                    evidence.append(
+                        {
+                            "cycle": name,
+                            "started_at": cycle_events[0].get("updated_at"),
+                            "failed_at": next(
+                                (
+                                    item.get("updated_at")
+                                    for item in cycle_events
+                                    if item["to"].casefold() == "провал"
+                                ),
+                                None,
+                            ),
+                            "returned_to_work_at": next(
+                                (
+                                    item.get("updated_at")
+                                    for item in cycle_events
+                                    if item["to"].casefold() == "в работе"
+                                ),
+                                None,
+                            ),
+                            "retested_at": event.get("updated_at"),
+                        }
+                    )
+                    phase = "testing"
+                    cycle_events = [event]
+    return count, evidence, dict(sorted(transition_counts.items()))
+
+
 _FINAL_STATUS_TYPE_KEYS = frozenset({"done", "cancelled"})
 
 logger = logging.getLogger(__name__)
@@ -4199,20 +4349,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             {"from": "Тестируется", "to": "Провал"},
             {"from": "Можно тестировать", "to": "Ревью"},
         ]
-        allowed_pairs = {
-            (pair["from"].casefold(), pair["to"].casefold()) for pair in display_pairs
-        }
-        working_statuses = {
-            name.casefold()
-            for name in (
-                "Будем делать",
-                "В работе",
-                "Ревью",
-                "Можно тестировать",
-                "Тестируется",
-                "Провал",
-            )
-        }
+        working_statuses = _RETURN_WORKING_STATUSES
 
         issues_api = ctx.request_context.lifespan_context.issues
         auth = get_yandex_auth(ctx)
@@ -4245,126 +4382,13 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 break
             fetch_page += 1
 
-        def _display(value: object) -> str | None:
-            if not isinstance(value, dict):
-                return None
-            raw = value.get("display") or value.get("key") or value.get("id")
-            return str(raw) if raw is not None else None
-
         table: list[dict[str, Any]] = []
         total_returns = 0
         for issue in issues:
             assert issue.key is not None
             changes = await issues_api.issue_get_status_changelog(issue.key, auth=auth)
-            count = 0
-            evidence: list[dict[str, Any]] = []
-            transition_counts: Counter[str] = Counter()
-            visited_work_statuses: Counter[str] = Counter()
-            status_events: list[dict[str, Any]] = []
-            for change in changes:
-                for changed in change.get("fields", []):
-                    if not isinstance(changed, dict):
-                        continue
-                    field = changed.get("field") or {}
-                    if not isinstance(field, dict):
-                        continue
-                    if field.get("id") != "status" and field.get("key") != "status":
-                        continue
-                    source = _display(changed.get("from"))
-                    target = _display(changed.get("to"))
-                    if source is not None and target is not None:
-                        status_events.append(
-                            {
-                                "from": source,
-                                "to": target,
-                                "updated_at": change.get("updatedAt"),
-                            }
-                        )
-                    if metric == "qa_rework_cycle":
-                        continue
-                    is_return = False
-                    if source is not None and target is not None:
-                        if metric == "testing_rework":
-                            is_return = (
-                                source.casefold(),
-                                target.casefold(),
-                            ) in allowed_pairs
-                        elif target.casefold() in working_statuses:
-                            visited_work_statuses[target.casefold()] += 1
-                            is_return = visited_work_statuses[target.casefold()] > 1
-                    if is_return:
-                        count += 1
-                        transition_counts[f"{source} → {target}"] += 1
-                        evidence.append(
-                            {
-                                "from": source,
-                                "to": target,
-                                "updated_at": change.get("updatedAt"),
-                            }
-                        )
-            if metric == "qa_rework_cycle":
-                # Changelog is normally chronological; sorting also makes the
-                # contract deterministic for synthetic and future API variants.
-                status_events.sort(key=lambda event: str(event.get("updated_at") or ""))
-                phase = "waiting_for_test"
-                cycle_events: list[dict[str, Any]] = []
-                for event in status_events:
-                    source = event["from"]
-                    target = event["to"]
-                    if phase == "waiting_for_test":
-                        if (
-                            source.casefold() == "тестируется"
-                            and target.casefold() == "провал"
-                        ):
-                            phase = "failed"
-                            cycle_events = [event]
-                        elif target.casefold() == "тестируется":
-                            phase = "testing"
-                            cycle_events = [event]
-                    elif phase == "testing":
-                        if (
-                            source.casefold() == "тестируется"
-                            and target.casefold() == "провал"
-                        ):
-                            phase = "failed"
-                            cycle_events.append(event)
-                        elif target.casefold() == "тестируется":
-                            cycle_events = [event]
-                    elif phase == "failed":
-                        cycle_events.append(event)
-                        if target.casefold() == "в работе":
-                            phase = "rework"
-                    elif phase == "rework":
-                        cycle_events.append(event)
-                        if target.casefold() == "тестируется":
-                            count += 1
-                            name = "Тестируется → Провал → В работе → Тестируется"
-                            transition_counts[name] += 1
-                            evidence.append(
-                                {
-                                    "cycle": name,
-                                    "started_at": cycle_events[0].get("updated_at"),
-                                    "failed_at": next(
-                                        (
-                                            item.get("updated_at")
-                                            for item in cycle_events
-                                            if item["to"].casefold() == "провал"
-                                        ),
-                                        None,
-                                    ),
-                                    "returned_to_work_at": next(
-                                        (
-                                            item.get("updated_at")
-                                            for item in cycle_events
-                                            if item["to"].casefold() == "в работе"
-                                        ),
-                                        None,
-                                    ),
-                                    "retested_at": event.get("updated_at"),
-                                }
-                            )
-                            phase = "testing"
-                            cycle_events = [event]
+            count, evidence, transitions = _count_issue_returns(changes, metric)
+            transition_counts: Counter[str] = Counter(transitions)
             total_returns += count
             table.append(
                 {

@@ -19,10 +19,11 @@ Tracker API facts these tools rely on (probed live against the org API):
 Durations follow the fork convention: 8 hours per day, 5 days per week.
 """
 
+import asyncio
 import re
 from collections import Counter
 from datetime import date
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.server import FastMCP
 from mcp.server.fastmcp import Context
@@ -33,6 +34,7 @@ from mcp_tracker.mcp.context import AppContext
 from mcp_tracker.mcp.tools.issue_read import (
     _FINAL_STATUS_TYPE_KEYS,
     _cap_rows_for_budget,
+    _count_issue_returns,
     _duration_hours,
     _reference_display,
     _reference_key,
@@ -60,6 +62,9 @@ _NO_ASSIGNEE = "(без исполнителя)"
 _DASH = "—"
 # Per-sprint states that carry no figures and must not count as analysed.
 _SPRINT_FAILURE_STATES = frozenset({"sprint_error", "sprint_not_found"})
+# Changelog fetches run with bounded concurrency (status history per issue).
+_RETURNS_CONCURRENCY = 4
+_RETURN_METRICS = ("qa_rework_cycle", "testing_rework", "repeated_work_status")
 
 
 def _hours_or_none(value: object) -> float | None:
@@ -76,6 +81,13 @@ def _fmt_hours(value: float | None) -> str:
     if value is None:
         return _DASH
     return f"{round(value, 2):g}"
+
+
+def _fmt_returns(value: object) -> str:
+    """Return count cell: a number, or — when the issue was not scanned."""
+    if value is None:
+        return _DASH
+    return str(value)
 
 
 def _queue_stem(queue: str) -> str:
@@ -254,6 +266,7 @@ def _sprint_table(rows: list[dict[str, Any]]) -> str:
         "Исполнитель",
         "План часов",
         "Факт часов",
+        "Количество возвратов",
     ]
     lines = [
         "| " + " | ".join(headers) + " |",
@@ -270,6 +283,7 @@ def _sprint_table(rows: list[dict[str, Any]]) -> str:
                     str(row.get("assignee") or _DASH),
                     _fmt_hours(row.get("plan_hours")),
                     _fmt_hours(row.get("fact_hours")),
+                    _fmt_returns(row.get("returns")),
                 ]
             )
             + " |"
@@ -323,6 +337,10 @@ async def _sprint_metrics(
     sprint_id: int,
     queue: str | None,
     max_issues: int,
+    *,
+    with_returns: bool = False,
+    returns_metric: str = "qa_rework_cycle",
+    max_return_scans: int = 300,
 ) -> dict[str, Any]:
     """Counts, plan/fact hours, per-assignee split and per-issue rows of one sprint.
 
@@ -401,10 +419,47 @@ async def _sprint_metrics(
                 "queue": queue_key,
                 "plan_hours": plan,
                 "fact_hours": fact,
+                "returns": None,
                 "url": f"https://tracker.yandex.ru/{issue.key}",
             }
         )
     rows.sort(key=lambda row: _key_order(row["key"]))
+    returns_info: dict[str, Any] = {
+        "returns_metric": returns_metric if with_returns else None,
+        "returns_total": 0,
+        "issues_with_returns": 0,
+        "returns_scanned": 0,
+        "returns_skipped": 0,
+        "returns_failed": 0,
+    }
+    if with_returns and rows:
+        # Status history is one request per issue: bounded concurrency, a hard
+        # scan cap and per-issue failure isolation (a bad changelog must not
+        # cost the whole report). Unscanned rows keep returns=None → "—" in
+        # the table, never a silent zero.
+        semaphore = asyncio.Semaphore(_RETURNS_CONCURRENCY)
+        targets = rows[:max_return_scans]
+        returns_info["returns_skipped"] = len(rows) - len(targets)
+
+        async def _scan(row: dict[str, Any]) -> None:
+            async with semaphore:
+                try:
+                    changes = await issues_api.issue_get_status_changelog(
+                        row["key"], auth=auth
+                    )
+                except Exception:  # noqa: BLE001 — isolate one bad changelog
+                    returns_info["returns_failed"] += 1
+                    return
+            count, _evidence, _transitions = _count_issue_returns(
+                changes, returns_metric
+            )
+            row["returns"] = count
+            returns_info["returns_scanned"] += 1
+            returns_info["returns_total"] += count
+            if count:
+                returns_info["issues_with_returns"] += 1
+
+        await asyncio.gather(*(_scan(row) for row in targets))
     breakdown = sorted(
         assignees.values(), key=lambda item: (-item["issues_total"], item["assignee"])
     )
@@ -429,6 +484,7 @@ async def _sprint_metrics(
         "assignee_breakdown": breakdown,
         "rows": rows,
         "unparsed_duration_values": unparsed,
+        "returns": returns_info,
     }
 
 
@@ -647,7 +703,8 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     @mcp.tool(
         title="Sprint Results: Plan vs Fact Hours and Per-Person Split",
         description=(
-            "ONE-SHOT results report for ONE board sprint at any depth: use for "
+            "ONE-SHOT results report for ONE board sprint at any depth, with the "
+            "per-issue return count column: use for "
             "«результаты спринта», «собери результаты прошедшего спринта», "
             "«сколько задач выполнено и сколько осталось», «план/факт по часам», "
             "«по исполнителям», «разбивка спринта по статусам», or a pasted "
@@ -659,8 +716,16 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "estimation), fact hours (sum of spent), and a per-assignee "
             "breakdown. A PRE-BUILT markdown table (key 'table') in columns "
             "«Очередь | Номер Задачи | Статус | Исполнитель | План часов | Факт "
-            "часов» must be copied VERBATIM with every row on its own line — "
-            "never rebuild, shorten or re-order it. Hours are 8h/day, 5d/week; "
+            "часов | Количество возвратов» must be copied VERBATIM with every "
+            "row on its own line — never rebuild, shorten or re-order it. The "
+            "returns column counts each issue's status history with the same "
+            "metrics as issues_count_release_status_returns (default "
+            "qa_rework_cycle — one complete Тестируется→Провал→В работе→…→"
+            "Тестируется loop), one changelog request per issue, 4 in flight, "
+            "bounded by max_return_scans; '—' means NOT scanned (cap or a failed "
+            "changelog) and must never be reported as zero returns — quote "
+            "counts.returns_total with coverage.returns_scanned/returns_skipped. "
+            "Hours are 8h/day, 5d/week; "
             "fact = logged spent time (not task lifetime) — say so. This is NOT "
             "a release-version tool: for version_id use "
             "issues_metrics_release_readiness / issues_summarize_effort. Never "
@@ -709,6 +774,34 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 ),
             ),
         ] = 2_000,
+        returns_metric: Annotated[
+            Literal["qa_rework_cycle", "testing_rework", "repeated_work_status"],
+            Field(
+                description=(
+                    "How the «Количество возвратов» column is counted (same "
+                    "semantics as issues_count_release_status_returns): "
+                    "qa_rework_cycle = one complete Тестируется→Провал→В работе→"
+                    "…→Тестируется loop (default), testing_rework = the exact "
+                    "Тестируется→Провал / Можно тестировать→Ревью transitions, "
+                    "repeated_work_status = every visit after the first to a "
+                    "working status"
+                )
+            ),
+        ] = "qa_rework_cycle",
+        max_return_scans: Annotated[
+            int,
+            Field(
+                ge=0,
+                le=2_000,
+                description=(
+                    "How many issues get a return count (one status-changelog "
+                    "request each, 4 in flight). Rows beyond the cap show '—' in "
+                    "the returns column and are counted in "
+                    "coverage.returns_skipped — never report them as 0 returns. "
+                    "0 skips the column entirely."
+                ),
+            ),
+        ] = 300,
     ) -> dict[str, Any]:
         if queue is not None and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", queue):
             raise ValueError("queue must be a Yandex Tracker queue key")
@@ -730,7 +823,14 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         sprint_row = _sprint_row(sprint)
         try:
             metrics = await _sprint_metrics(
-                issues_api, auth, sprint_id, queue, max_issues
+                issues_api,
+                auth,
+                sprint_id,
+                queue,
+                max_issues,
+                with_returns=max_return_scans > 0,
+                returns_metric=returns_metric,
+                max_return_scans=max_return_scans,
             )
         except Exception as exc:  # noqa: BLE001 — surface upstream failure
             return {
@@ -757,6 +857,9 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 "status_counts": metrics["status_counts"],
                 "queue_counts": metrics["queue_counts"],
                 "issues_without_assignee": metrics["issues_without_assignee"],
+                "returns_total": metrics["returns"]["returns_total"],
+                "issues_with_returns": metrics["returns"]["issues_with_returns"],
+                "returns_metric": metrics["returns"]["returns_metric"],
             },
             "hours": {
                 "plan_hours": metrics["plan_hours"],
@@ -774,6 +877,13 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 "table_rows_returned": len(table_rows),
                 "table_rows_total": len(rows),
                 "unparsed_duration_values": metrics["unparsed_duration_values"],
+                "returns_scanned": metrics["returns"]["returns_scanned"],
+                "returns_skipped": metrics["returns"]["returns_skipped"],
+                "returns_failed": metrics["returns"]["returns_failed"],
+                "returns_note": (
+                    "A '—' in the returns column means the issue was NOT scanned "
+                    "(cap or changelog failure), not zero returns."
+                ),
                 "sprint_filter": "structured sprint filter via the client",
             },
             "reporting_contract": {
