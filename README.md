@@ -86,7 +86,9 @@ intentionally stays on 0.7.1 because the runtime integration depends on
   distributions, per-queue split, plan hours (sum of `estimation`), fact hours
   (sum of `spent`), a per-assignee breakdown, per-issue RETURN counts and a
   PRE-BUILT markdown table
-  `Очередь | Номер Задачи | Заголовок | Статус | Исполнитель | План часов | Факт часов | Количество возвратов`.
+  `Очередь | Номер Задачи | Заголовок | Статус | Исполнитель | План часов | Факт часов | Количество возвратов`,
+  where the Номер Задачи cell is a markdown link to
+  `https://tracker.yandex.ru/<KEY>` so issues stay clickable in Telegram.
   Summaries are copied verbatim (never shortened); the table carries its own
   12K-char budget, so a sprint with many long titles returns fewer rows than it
   scanned — `coverage.table_rows_returned / table_rows_total /

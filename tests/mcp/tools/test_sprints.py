@@ -322,10 +322,13 @@ class TestSprintResults:
         )
         assert table.splitlines()[1] == "|---|---|---|---|---|---|---|---|"
         assert (
-            "| TEST | TEST-1 | Summary TEST-1 | Закрыт | Ivan Ivanov | 40 | 24 | 1 |"
-            in table
+            "| TEST | [TEST-1](https://tracker.yandex.ru/TEST-1) | Summary TEST-1 | "
+            "Закрыт | Ivan Ivanov | 40 | 24 | 1 |" in table
         )
-        assert "| TEST | TEST-3 | Summary TEST-3 | Отменён | — | — | — | 1 |" in table
+        assert (
+            "| TEST | [TEST-3](https://tracker.yandex.ru/TEST-3) | Summary TEST-3 | "
+            "Отменён | — | — | — | 1 |" in table
+        )
         assert content["coverage"]["table_rows_returned"] == 3
         # returns come from each issue's status changelog
         assert content["counts"]["returns_total"] == 3
@@ -384,7 +387,10 @@ class TestSprintResults:
         rows = {row["key"]: row["returns"] for row in content["rows"]}
         assert rows == {"TEST-1": 1, "TEST-2": None, "TEST-3": None}
         table = content["table"]
-        assert "| TEST | TEST-2 | Summary TEST-2 | Open | — | — | — | — |" in table
+        assert (
+            "| TEST | [TEST-2](https://tracker.yandex.ru/TEST-2) | Summary TEST-2 | "
+            "Open | — | — | — | — |" in table
+        )
         assert (
             "unscanned" in content["coverage"]["returns_note"]
             or "NOT scanned" in content["coverage"]["returns_note"]
@@ -456,8 +462,8 @@ class TestSprintResults:
         assert content["counts"]["returns_metric"] is None
         assert content["coverage"]["returns_scanned"] == 0
         assert (
-            "| TEST | TEST-1 | Summary TEST-1 | Open | — | — | — | — |"
-            in content["table"]
+            "| TEST | [TEST-1](https://tracker.yandex.ru/TEST-1) | Summary TEST-1 | "
+            "Open | — | — | — | — |" in content["table"]
         )
 
     async def test_uncapped_breakdown_is_sorted_by_load(

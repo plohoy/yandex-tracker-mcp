@@ -85,6 +85,15 @@ def _fmt_hours(value: float | None) -> str:
     return f"{round(value, 2):g}"
 
 
+def _issue_ref_cell(row: dict[str, Any]) -> str:
+    """Issue key as a markdown link to the tracker issue (plain key without url)."""
+    key = str(row.get("key") or _DASH)
+    url = row.get("url")
+    if not url:
+        return key
+    return f"[{key}]({url})"
+
+
 def _fmt_returns(value: object) -> str:
     """Return count cell: a number, or — when the issue was not scanned."""
     if value is None:
@@ -258,9 +267,10 @@ def _key_order(key: str) -> tuple[str, int, str]:
 
 
 def _sprint_table(rows: list[dict[str, Any]]) -> str:
-    """Pre-built markdown table «Очередь | Номер Задачи | Статус | Исполнитель |
-    План часов | Факт часов» (no code fence — the user's surface renders real
-    tables). The model copies it verbatim; rows are sorted queue-less."""
+    """Pre-built markdown table «Очередь | Номер Задачи | Заголовок | Статус |
+    Исполнитель | План часов | Факт часов | Количество возвратов» (no code
+    fence — the user's surface renders real tables). The Номер Задачи cell is a
+    markdown link to the tracker issue; the model copies the table verbatim."""
     headers = [
         "Очередь",
         "Номер Задачи",
@@ -281,7 +291,7 @@ def _sprint_table(rows: list[dict[str, Any]]) -> str:
             + " | ".join(
                 [
                     str(row.get("queue") or _DASH),
-                    str(row.get("key") or _DASH),
+                    _issue_ref_cell(row),
                     str(row.get("summary") or _DASH),
                     str(row.get("status") or _DASH),
                     str(row.get("assignee") or _DASH),
@@ -741,7 +751,8 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "estimation), fact hours (sum of spent), and a per-assignee "
             "breakdown. A PRE-BUILT markdown table (key 'table') in columns "
             "«Очередь | Номер Задачи | Заголовок | Статус | Исполнитель | План "
-            "часов | Факт часов | Количество возвратов» must be copied VERBATIM "
+            "часов | Факт часов | Количество возвратов», where Номер Задачи is a "
+            "markdown link to the issue, must be copied VERBATIM "
             "with every "
             "row on its own line — never rebuild, shorten or re-order it. The "
             "returns column counts each issue's status history with the same "
@@ -928,7 +939,8 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 "Pre-built markdown table (columns Очередь | Номер Задачи | Заголовок "
                 "| Статус | Исполнитель | План часов | Факт часов | Количество "
                 "возвратов); copy it verbatim, every row on its own line, no code "
-                "fence, and keep summaries complete — never shorten them. "
+                "fence, keep summaries complete — never shorten them — and keep the "
+                "Номер Задачи cell as a markdown link so the issue stays clickable. "
                 + (
                     f"Rows shown: {len(table_rows)} of {len(rows)} "
                     "(the table is bounded to fit the response budget; say so and "
