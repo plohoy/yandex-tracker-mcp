@@ -317,12 +317,15 @@ class TestSprintResults:
         table = content["table"]
         header = table.splitlines()[0]
         assert header == (
-            "| Очередь | Номер Задачи | Статус | Исполнитель | План часов | Факт часов "
-            "| Количество возвратов |"
+            "| Очередь | Номер Задачи | Заголовок | Статус | Исполнитель | План часов "
+            "| Факт часов | Количество возвратов |"
         )
-        assert table.splitlines()[1] == "|---|---|---|---|---|---|---|"
-        assert "| TEST | TEST-1 | Закрыт | Ivan Ivanov | 40 | 24 | 1 |" in table
-        assert "| TEST | TEST-3 | Отменён | — | — | — | 1 |" in table
+        assert table.splitlines()[1] == "|---|---|---|---|---|---|---|---|"
+        assert (
+            "| TEST | TEST-1 | Summary TEST-1 | Закрыт | Ivan Ivanov | 40 | 24 | 1 |"
+            in table
+        )
+        assert "| TEST | TEST-3 | Summary TEST-3 | Отменён | — | — | — | 1 |" in table
         assert content["coverage"]["table_rows_returned"] == 3
         # returns come from each issue's status changelog
         assert content["counts"]["returns_total"] == 3
@@ -331,6 +334,33 @@ class TestSprintResults:
         assert content["coverage"]["returns_scanned"] == 3
         assert content["coverage"]["returns_skipped"] == 0
         assert content["coverage"]["returns_failed"] == 0
+
+    async def test_long_summaries_trim_the_table_not_the_counters(
+        self, client_session: ClientSession, mock_issues_protocol: AsyncMock
+    ) -> None:
+        mock_issues_protocol.sprint_get = AsyncMock(return_value=_sprint(1))
+        mock_issues_protocol.issue_get_status_changelog = AsyncMock(return_value=[])
+        long_issues = []
+        for index in range(120):
+            issue = _issue(f"TEST-{index}")
+            issue.summary = "Очень длинный заголовок задачи " * 4
+            long_issues.append(issue)
+        # page 1 returns the batch, page 2 ends the drain
+        mock_issues_protocol.issues_find_filter = AsyncMock(
+            side_effect=[long_issues, []]
+        )
+
+        result = await client_session.call_tool(
+            "issues_metrics_sprint_results", {"sprint_id": 1, "max_return_scans": 0}
+        )
+
+        content = get_tool_result_content(result)
+        coverage = content["coverage"]
+        assert content["counts"]["issues_total"] == 120  # counters stay complete
+        assert coverage["table_trimmed_by_size"] is True
+        assert coverage["table_rows_returned"] < coverage["table_rows_total"]
+        assert coverage["table_rows_total"] == 120
+        assert "never shorten" in content["table_note"]
 
     async def test_returns_column_marks_unscanned_rows(
         self, client_session: ClientSession, mock_issues_protocol: AsyncMock
@@ -354,7 +384,7 @@ class TestSprintResults:
         rows = {row["key"]: row["returns"] for row in content["rows"]}
         assert rows == {"TEST-1": 1, "TEST-2": None, "TEST-3": None}
         table = content["table"]
-        assert "| TEST | TEST-2 | Open | — | — | — | — |" in table
+        assert "| TEST | TEST-2 | Summary TEST-2 | Open | — | — | — | — |" in table
         assert (
             "unscanned" in content["coverage"]["returns_note"]
             or "NOT scanned" in content["coverage"]["returns_note"]
@@ -425,7 +455,10 @@ class TestSprintResults:
         content = get_tool_result_content(result)
         assert content["counts"]["returns_metric"] is None
         assert content["coverage"]["returns_scanned"] == 0
-        assert "| TEST | TEST-1 | Open | — | — | — | — |" in content["table"]
+        assert (
+            "| TEST | TEST-1 | Summary TEST-1 | Open | — | — | — | — |"
+            in content["table"]
+        )
 
     async def test_uncapped_breakdown_is_sorted_by_load(
         self, client_session: ClientSession, mock_issues_protocol: AsyncMock

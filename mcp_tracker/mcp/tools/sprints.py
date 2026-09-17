@@ -56,8 +56,10 @@ _SPRINT_FIELDS = [
 ]
 
 # Rows in the pre-built per-issue table (the model copies it verbatim; the
-# structured `rows` list is capped separately by the response budget).
+# structured `rows` list is capped separately by the response budget). The
+# 8-column table with verbatim summaries also carries its own char budget.
 _TABLE_ROW_LIMIT = 150
+_TABLE_BUDGET_CHARS = 12_000
 _NO_ASSIGNEE = "(без исполнителя)"
 _DASH = "—"
 # Per-sprint states that carry no figures and must not count as analysed.
@@ -262,6 +264,7 @@ def _sprint_table(rows: list[dict[str, Any]]) -> str:
     headers = [
         "Очередь",
         "Номер Задачи",
+        "Заголовок",
         "Статус",
         "Исполнитель",
         "План часов",
@@ -279,6 +282,7 @@ def _sprint_table(rows: list[dict[str, Any]]) -> str:
                 [
                     str(row.get("queue") or _DASH),
                     str(row.get("key") or _DASH),
+                    str(row.get("summary") or _DASH),
                     str(row.get("status") or _DASH),
                     str(row.get("assignee") or _DASH),
                     _fmt_hours(row.get("plan_hours")),
@@ -289,6 +293,27 @@ def _sprint_table(rows: list[dict[str, Any]]) -> str:
             + " |"
         )
     return "\n".join(lines)
+
+
+def _table_rows_for_budget(
+    rows: list[dict[str, Any]], budget: int = _TABLE_BUDGET_CHARS
+) -> list[dict[str, Any]]:
+    """Longest prefix of rows whose rendered table stays inside the budget.
+
+    Summaries are copied verbatim (never shortened), so a sprint with long
+    titles needs fewer rows per answer; the remainder is reported in coverage
+    instead of blowing the response budget.
+    """
+    if not rows or len(_sprint_table(rows)) <= budget:
+        return rows
+    low, high = 1, len(rows)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if len(_sprint_table(rows[:mid])) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return rows[:low]
 
 
 def _history_table(per_sprint: list[dict[str, Any]]) -> str:
@@ -715,8 +740,9 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "per-status-type distributions, per-queue split, plan hours (sum of "
             "estimation), fact hours (sum of spent), and a per-assignee "
             "breakdown. A PRE-BUILT markdown table (key 'table') in columns "
-            "«Очередь | Номер Задачи | Статус | Исполнитель | План часов | Факт "
-            "часов | Количество возвратов» must be copied VERBATIM with every "
+            "«Очередь | Номер Задачи | Заголовок | Статус | Исполнитель | План "
+            "часов | Факт часов | Количество возвратов» must be copied VERBATIM "
+            "with every "
             "row on its own line — never rebuild, shorten or re-order it. The "
             "returns column counts each issue's status history with the same "
             "metrics as issues_count_release_status_returns (default "
@@ -842,7 +868,8 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 "required_action": "Retry the same call once.",
             }
         rows = metrics["rows"]
-        table_rows = rows[:_TABLE_ROW_LIMIT]
+        table_rows = _table_rows_for_budget(rows[:_TABLE_ROW_LIMIT])
+        table_trimmed = len(table_rows) < len(rows)
         payload: dict[str, Any] = {
             "status": "complete",
             "complete": metrics["drain_complete"],
@@ -876,6 +903,8 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
                 "max_issues": max_issues,
                 "table_rows_returned": len(table_rows),
                 "table_rows_total": len(rows),
+                "table_trimmed_by_size": table_trimmed,
+                "table_budget_chars": _TABLE_BUDGET_CHARS,
                 "unparsed_duration_values": metrics["unparsed_duration_values"],
                 "returns_scanned": metrics["returns"]["returns_scanned"],
                 "returns_skipped": metrics["returns"]["returns_skipped"],
@@ -896,11 +925,15 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         if include_table:
             payload["table"] = _sprint_table(table_rows)
             payload["table_note"] = (
-                "Pre-built markdown table; copy it verbatim, every row on its own "
-                "line, no code fence. "
+                "Pre-built markdown table (columns Очередь | Номер Задачи | Заголовок "
+                "| Статус | Исполнитель | План часов | Факт часов | Количество "
+                "возвратов); copy it verbatim, every row on its own line, no code "
+                "fence, and keep summaries complete — never shorten them. "
                 + (
-                    f"Rows shown: {len(table_rows)} of {len(rows)}."
-                    if len(table_rows) < len(rows)
+                    f"Rows shown: {len(table_rows)} of {len(rows)} "
+                    "(the table is bounded to fit the response budget; say so and "
+                    "quote coverage.table_rows_total)."
+                    if table_trimmed
                     else "All rows of the scan are shown."
                 )
             )
