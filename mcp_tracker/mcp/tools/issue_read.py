@@ -2872,7 +2872,8 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "coverage.total_rows rows. Never call the same page twice — "
             "re-fetching data you already have bloats the context and can "
             "exceed the model's memory limit. "
-            "Use for «залежавшиеся», «что у X в тестировании», «загрузка тестировщиков»."
+            "Short age-filter alias: «неактивные X 2м». Use also for "
+            "«залежавшиеся», «что у X в тестировании», «загрузка тестировщиков»."
         ),
         annotations=ToolAnnotations(readOnlyHint=True),
     )
@@ -2938,7 +2939,8 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     @mcp.tool(
         title="List Recent Status Activity for an Assignee",
         description=(
-            "ONE-SHOT exhaustive read-only tool for requests such as: "
+            "ONE-SHOT exhaustive read-only tool. Short alias: "
+            "'активность X Nд'. Use for requests such as: "
             "'найди все задачи, закрытые или бывшие в работе/тестировании "
             "за последние 5 дней, исполнитель Иванов'. Resolves the assignee, "
             "fetches both open and closed assigned issues, exhaustively scans each "
@@ -3016,7 +3018,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     @mcp.tool(
         title="List Stale Work Statuses for an Assignee",
         description=(
-            "ONE-SHOT tool for natural requests such as 'найди все задачи "
+            "ONE-SHOT tool. Short alias: 'застой X'. Use for natural requests such as 'найди все задачи "
             "Иванова, которые долго не меняли рабочие статусы'. Resolves the "
             "assignee and returns only their CURRENT issues in semantic statuses "
             "in_progress, testing, or needs_info that have remained there for "
@@ -3071,7 +3073,7 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     @mcp.tool(
         title="List Stale Work Statuses for Multiple Assignees",
         description=(
-            "BATCH ONE-SHOT tool for requests naming two or more people, such as "
+            "BATCH ONE-SHOT tool. Short alias: 'застой X,Y,Z'. Use for requests naming two or more people, such as "
             "'найди залежавшиеся задачи у исполнителей: Иванов, Петров, "
             "Сидоров'. Pass all names unchanged in one assignees array. The server "
             "loads the user catalogue once, performs one multi-assignee issue scan, "
@@ -3431,7 +3433,9 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "statuses from Tracker, and paginates internally. Use this for multi-queue "
             "summary/table requests and for stale QA worksets. Pass stale_updated_before "
             "and/or sprint_ended_before to return only stale rows, with title, updated date, "
-            "and machine-derived reasons. For counts-only summaries set include_table=false "
+            "and machine-derived reasons. Short cutoff alias: "
+            "'QA до YYYY-MM-DD QUEUE...'. "
+            "For counts-only summaries set include_table=false "
             "(the table is capped to the response budget otherwise; rows_capped in coverage) "
             "to avoid returning every issue row. "
             "assignee_counts gives the per-tester load (qa_ready/qa_active/total) — use for "
@@ -3834,7 +3838,8 @@ def register_issue_read_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         title="Count Queue Issues in the Current Sprint by Status",
         description=(
             "Count and list issues for a queue, status, and the active sprint of its "
-            "board. Use ONLY when the user explicitly says current sprint, for questions like 'how many tasks are testing in the "
+            "board. Short alias: «спринт-статус STATUS QUEUE». "
+            "Use ONLY when the user explicitly says current sprint, for questions like 'how many tasks are testing in the "
             "current sprint'. NOT for «переносы спринтов»/carryover — that is issues_metrics_sprint_carryover. "
             "Do not repeatedly call issues_find or invent YQL. "
             "An empty result is authoritative only when this tool reports complete=true."

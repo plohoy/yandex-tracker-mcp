@@ -529,7 +529,7 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     @mcp.tool(
         title="List Board Sprints or Resolve a Sprint by id",
         description=(
-            "SPRINT CATALOGUE at any depth. Two shapes: "
+            "SPRINT CATALOGUE at any depth. Short alias: «спринты X». Two shapes: "
             "(1) sprint_id given — resolves that exact sprint by id through "
             "GET v3/sprints/{id} (works for ANY sprint, current or years old, and "
             "returns its board, dates and state) — use it for a pasted link such as "
@@ -738,7 +738,8 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     @mcp.tool(
         title="Sprint Results: Plan vs Fact Hours and Per-Person Split",
         description=(
-            "ONE-SHOT results report for ONE board sprint at any depth, with the "
+            "ONE-SHOT results report for ONE board sprint at any depth. Short "
+            "alias: «итоги спринта X». Includes the "
             "per-issue return count column: use for "
             "«результаты спринта», «собери результаты прошедшего спринта», "
             "«сколько задач выполнено и сколько осталось», «план/факт по часам», "
@@ -959,7 +960,8 @@ def register_sprint_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     @mcp.tool(
         title="Sprint History Analytics Across Several Sprints",
         description=(
-            "MULTI-SPRINT analytics in ONE call: use for «аналитика по нескольким "
+            "MULTI-SPRINT analytics in ONE call. Short alias: «динамика спринтов "
+            "X». Use also for «аналитика по нескольким "
             "прошедшим спринтам», «сравни спринты», «динамика по спринтам», "
             "«сколько задач выполнялось в последних спринтах», «тренд "
             "выполнения/план-факт по спринтам очереди X». Scope: pass queue, "

@@ -346,7 +346,8 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         description=(
             "QA-lead release readiness metrics for a release version: issue "
             "composition by status type, open critical/blocker issues, "
-            "estimation coverage and defect density. Use for 'готов ли релиз', "
+            "estimation coverage and defect density. Short alias: "
+            "'готовность X [QUEUE]'. Use for 'готов ли релиз', "
             "'сколько критичных открыто', 'покрытие оценками', "
             "'плотность дефектов'. Counters always cover the whole release; "
             "the open-critical table is capped (rows_capped in coverage)."
@@ -475,7 +476,7 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "'что сейчас чинится после провала'. Optionally scope to a "
             "release version. Changelog per issue is cached server-side; "
             "the in-rework table is capped (rows_capped in coverage). "
-            "Use for «цикл тестирования», «сколько длится тестирование», "
+            "Short alias: «цикл QA [QUEUE]». Use for «цикл тестирования», «сколько длится тестирование», "
             "«время реворка». The response fits the inline budget — never "
             "assume truncation unless coverage reports rows_capped=true."
         ),
@@ -659,7 +660,8 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "range — created/closed/open totals with a per-queue breakdown, "
             "weekly trend, open-bug aging buckets (<30 / 30-90 / >90 days), "
             "and escapes (issues whose tags or resolution contain "
-            "escape_marker, e.g. «прод»). Use for «тренд багов», «старение "
+            "escape_marker, e.g. «прод»). Short aliases: «баги [QUEUE] Nд» "
+            "and «утечки [QUEUE] Nд». Use for «тренд багов», «старение "
             "багов», «утечки в прод» across the department. Closed dates are "
             "approximated by updated_at (reporting_contract). The escape "
             "table is capped (rows_capped in coverage). The response fits "
@@ -847,8 +849,9 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
         description=(
             "Meta-metrics about tracker data quality in a queue: share of "
             "issues without estimation, without spent time, without "
-            "description, and non-final issues stale for more than stale_days "
-            "(not updated). Use for 'кто не логирует время', 'без оценки', "
+            "description, and non-final issues not updated for more than "
+            "stale_days. Short alias: «дисциплина [QUEUE]». Use for "
+            "'кто не логирует время', 'без оценки', "
             "'без описания', 'зависшие задачи'. The stale table is capped "
             "(rows_capped in coverage). The per_queue breakdown covers ALL "
             "queues and always fits inline — never assume it was truncated; "
@@ -1029,7 +1032,8 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
             "was carried into the current sprint of a board. Use "
             "for 'сколько перенесли между спринтами', 'перегрузка "
             "планирования'. The carried table is capped (rows_capped in "
-            "coverage). Use for «переносы спринтов», «что перенесли со спринта». "
+            "coverage). Short alias: «переносы [QUEUE]». Use also for "
+            "«переносы спринтов», «что перенесли со спринта». "
             "The metric is board-scoped: resolve ONE board (by queue name or "
             "board_id) — do NOT iterate queues one by one; for the org-wide "
             "view pass all_queues=true (ONE call returns a compact per-queue "
@@ -1204,7 +1208,8 @@ def register_metrics_tools(settings: Settings, mcp: FastMCP[Any]) -> None:
     @mcp.tool(
         title="QA Department Dashboard",
         description=(
-            "Weekly QA-department dashboard («дашборд отдела QA»): ONE call "
+            "Weekly QA-department dashboard (short alias «QA-дашборд», also "
+            "«дашборд отдела QA»): ONE call "
             "returns the org-wide QA load — in-testing and stale issues per "
             "queue across ALL queues (or the queues given) — plus release "
             "readiness and return rate for the active release (auto-resolved "

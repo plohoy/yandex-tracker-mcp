@@ -105,32 +105,33 @@ intentionally stays on 0.7.1 because the runtime integration depends on
   plan-vs-fact ratio) and a pre-built `history_table`; per-sprint failures are
   isolated as `sprint_error`
 
-**Dashboard aliases (short commands for the agent / ready-to-paste):**
+**Canonical aliases (short commands for the agent / ready-to-paste):**
+
+Use the compact forms below in new prompts. Existing natural-language requests
+remain supported as routing synonyms, but are no longer the canonical aliases.
 
 | Alias | Expands to |
 |---|---|
-| `дашборд отдела QA` | `issues_metrics_qa_dashboard` (org-wide workset + active release + cycle + defects + discipline, one call) |
-| `готовность релиза X` | `issues_metrics_release_readiness(version_id, queue?)` |
-| `возвраты релиза X QUEUE` | `issues_count_release_returns_by_name(queue, release)` — one call |
+| `QA-дашборд` | `issues_metrics_qa_dashboard` (org-wide workset + active release + cycle + defects + discipline, one call) |
+| `готовность X [QUEUE]` | `issues_metrics_release_readiness(version_id, queue?)` |
+| `возвраты X QUEUE` | `issues_count_release_returns_by_name(queue, release)` — one call |
 | `оценки релиза X` | `issues_summarize_effort` twice (estimation + spent) + % without estimation |
-| `цикл тестирования` | `issues_metrics_testing_cycle(queue, max_issues)` |
-| `тренд багов` | `issues_metrics_defect_trend(created_after, queues? — org-wide)` |
-| `утечки в прод` | `issues_metrics_defect_trend(created_after, escape_marker=«прод») — org-wide` |
-| `загрузка тестировщиков` | `issues_assigned_open` per QA member |
-| `долги по создателям` | `issues_created_open` per creator |
-| `дисциплина данных` | `issues_metrics_data_discipline(queue? — org-wide, stale_days)` |
-| `переносы спринтов` | `issues_metrics_sprint_carryover(queue?, board_id?)` |
-| `что перенесли со спринта` / `переносы между спринтами` | same tool — `issues_metrics_sprint_carryover(queue?, board_id?, all_queues?)` |
-| `сколько задач текущего спринта в статусе X` | `issues_count_current_sprint_status(queue, status, board_id?)` — ONE status count for the CURRENT sprint; `queue` and `status` (exact displayed name) are both REQUIRED, and there is no sprint-id parameter |
-| `QA-задачи, чей спринт закончился до даты X` | `issues_list_qa_workset(queues, sprint_ended_before=<date>)` — `queues` is required; `sprint_ended_before` is an exclusive cutoff on a RESOLVED sprint end date, not a sprint id |
-| `задачи X за последние N дней (закрытые, в работе, в тестировании)` | `issues_list_assignee_status_activity(assignee=X, days=N, status_classes?=[closed,in_progress,testing])` — ONE call per person; for 2+ people call it once per person, never fan out into `issue_get` |
-| `результаты спринта X` / `план-факт по спринту` / `спринт с возвратами` / ссылка `sprint=<id>` | `issues_metrics_sprint_results(sprint_id, returns_metric?, max_return_scans?)` — one call, any depth; resolves the sprint itself and returns the per-issue table (`Очередь | Номер Задачи | Заголовок | Статус | Исполнитель | План часов | Факт часов | Количество возвратов`) |
-| `какие спринты есть в очереди X` / `какой спринт сейчас идёт` / `найди спринт по номеру` | `issues_list_sprints(queue?/board_id?/sprint_id?, limit, include_future)` — catalogue or single-sprint resolver |
-| `аналитика по нескольким прошедшим спринтам` / `сравни спринты` / `тренд выполнения по спринтам` | `issues_metrics_sprint_history(queue?/board_id?/sprint_ids?, last_n, include_current)` — one call, per-sprint rows + aggregates |
-| `залежавшиеся у X` | `issues_assigned_open(assignee, updated_before=2 месяца)` |
-| `найди все задачи X, закрытые или бывшие в работе или тестировании за последние N дней` | `issues_list_assignee_status_activity(assignee=X, days=N)` — one call |
-| `найди все задачи X, которые долго не меняли рабочие статусы` | `issues_list_stale_assignee_work_statuses(assignee=X)` — one call; «долго» = более 8 рабочих часов |
-| `найди залежавшиеся задачи у исполнителей: X, Y, Z` | `issues_list_stale_assignees_work_statuses(assignees=[X,Y,Z])` — one batch call, never fan out |
+| `цикл QA [QUEUE]` | `issues_metrics_testing_cycle(queue, max_issues)` |
+| `баги [QUEUE] Nд` | `issues_metrics_defect_trend(created_after, queues? — org-wide)` |
+| `утечки [QUEUE] Nд` | `issues_metrics_defect_trend(created_after, escape_marker=«прод») — org-wide` |
+| `нагрузка QA` | `issues_assigned_open` per QA member |
+| `долг авторов` | `issues_created_open` per creator |
+| `дисциплина [QUEUE]` | `issues_metrics_data_discipline(queue? — org-wide, stale_days)` |
+| `переносы [QUEUE]` | `issues_metrics_sprint_carryover(queue?, board_id?, all_queues?)` |
+| `спринт-статус STATUS QUEUE` | `issues_count_current_sprint_status(queue, status=STATUS, board_id?)` — one exact displayed status of the current sprint; queue and status are required |
+| `QA до YYYY-MM-DD QUEUE...` | `issues_list_qa_workset(queues, sprint_ended_before=<date>)` — exclusive cutoff on the resolved sprint end date |
+| `активность X Nд` | `issues_list_assignee_status_activity(assignee=X, days=N, status_classes?=[closed,in_progress,testing])` — one call per person |
+| `итоги спринта X` / ссылка `sprint=<id>` | `issues_metrics_sprint_results(sprint_id, returns_metric?, max_return_scans?)` — one call, any depth, including plan/fact and returns |
+| `спринты X` | `issues_list_sprints(queue?/board_name?/board_id?/sprint_id?, limit, include_future)` — catalogue or single-sprint resolver |
+| `динамика спринтов X` | `issues_metrics_sprint_history(queue?/board_name?/board_id?/sprint_ids?, last_n, include_current)` — one call, per-sprint rows + aggregates |
+| `неактивные X 2м` | `issues_assigned_open(assignee=X, updated_before=<date 2 months ago>)` |
+| `застой X` | `issues_list_stale_assignee_work_statuses(assignee=X)` — more than 8 business hours in the current working status |
+| `застой X,Y,Z` | `issues_list_stale_assignees_work_statuses(assignees=[X,Y,Z])` — one batch call, never fan out |
 
 **Sprint-work requests: covered vs not covered.** A board sprint is not a
 release version. Sprints are addressed directly now: `sprint_get` resolves any
